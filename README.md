@@ -16,12 +16,12 @@ You can install the required libraries using pip:
 
 ```sh
 pip install requests python-dotenv
-
+```
 ## Setup
 
 1. Clone the Repository: Clone this repository to your local machine.
-``git clone <repository-url>
-cd ergo-transaction-checker``
+``git clone <repository-url>``
+``cd ergo-transaction-checker``
 
 2. Create a `.env` file in the root directory of the project and add the following environment variables:
 
