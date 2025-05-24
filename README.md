@@ -25,13 +25,13 @@ pip install requests python-dotenv
 
 2. Create a `.env` file in the root directory of the project and add the following environment variables:
 
-DISCORD_WEBHOOK_URL=<your-discord-webhook-url>
+``DISCORD_WEBHOOK_URL=<your-discord-webhook-url>
 DISCORD_USER=<your-discord-user-id>
 Ergo_Mining_Wallet=<ergo-mining-wallet-address>
 Ergo_Grid_Wallet=<ergo-grid-wallet-address>
 Ergo_Bot_Wallet=<ergo-bot-wallet-address>
 Ergo_Rosen_Wallet=<ergo-rosen-wallet-address>
-
+``
 3. Run the script: You can run the script using the following command:
 
 ``pip install -r requirements.txt``
