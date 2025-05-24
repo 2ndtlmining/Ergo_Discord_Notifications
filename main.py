@@ -62,7 +62,7 @@ def check_for_new_transaction(wallet_name, wallet_address):
                 f"Ergo mining balance: ERG {ergo_mining_balance}\n"
                 f"Total transactions: {ergo_mining_transactions}\n"
                 "Last transaction details:\n"
-                f"[Transaction ID: {last_transaction_details.get('transaction_id', 'N/A')}](https://ergexplorer.com/transactions/{last_transaction_details.get('transaction_id', 'N/A')})\n"
+                f"Transaction ID: [{last_transaction_details.get('transaction_id', 'N/A')}](https://ergexplorer.com/transactions/{last_transaction_details.get('transaction_id', 'N/A')})\n"
                 f"Timestamp: {last_transaction_details.get('timestamp', 'N/A')}\n"
                 f"Value: ERG {last_transaction_details.get('value', 'N/A')}"
             )
