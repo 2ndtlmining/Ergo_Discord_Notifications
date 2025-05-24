@@ -11,12 +11,20 @@ The Ergo Transaction Checker is a Python script designed to monitor specified Er
 - `python-dotenv` library
 - `logging` module (built-in with Python)
 - `threading` module (built-in with Python)
+- `Discord Server Webhook` to send notifications to Discord.
+
 
 You can install the required libraries using pip:
 
 ```sh
 pip install requests python-dotenv
 ```
+or
+```sh
+pip install -r requirements.txt ```
+
+
+
 ## Setup
 
 1. Clone the Repository: Clone this repository to your local machine.
@@ -32,6 +40,7 @@ Ergo_Grid_Wallet=<ergo-grid-wallet-address>
 Ergo_Bot_Wallet=<ergo-bot-wallet-address>
 Ergo_Rosen_Wallet=<ergo-rosen-wallet-address>
 ``
+
 3. Run the script: You can run the script using the following command:
 
 ``pip install -r requirements.txt``
