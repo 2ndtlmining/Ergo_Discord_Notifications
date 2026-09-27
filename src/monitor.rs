@@ -1,6 +1,6 @@
 //! The polling loop: explorers + nodes -> shared state -> alerts.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
 
@@ -13,6 +13,7 @@ use crate::config::Config;
 use crate::discord::{Discord, Embed};
 use crate::explorer::{self, ExplorerState};
 use crate::node::{self, Health};
+use crate::wallet::WalletState;
 
 /// Consecutive polls a new condition must be seen before alerting.
 const CONFIRM_AFTER: u32 = 2;
@@ -28,6 +29,34 @@ pub struct AppState {
     pub reference: Reference,
     pub summary: Summary,
     pub nodes: Vec<NodeState>,
+    pub wallets: Vec<WalletState>,
+    /// Served separately at /api/alerts.
+    #[serde(skip)]
+    pub alerts: VecDeque<AlertRecord>,
+}
+
+const MAX_ALERTS: usize = 100;
+
+/// An alert as sent to Discord, kept in memory for the API and dashboard.
+#[derive(Debug, Clone, Serialize)]
+pub struct AlertRecord {
+    pub at: DateTime<Utc>,
+    /// Condition / icon name: ok, down, behind, indexer-behind, syncing, unreachable, received.
+    pub kind: String,
+    pub headline: String,
+    pub subject: String,
+    pub detail: String,
+}
+
+pub fn record_alert(state: &mut AppState, embed: &Embed) {
+    state.alerts.push_front(AlertRecord {
+        at: Utc::now(),
+        kind: embed.icon.clone(),
+        headline: embed.author.clone(),
+        subject: embed.title.clone(),
+        detail: embed.description.replace("**", ""),
+    });
+    state.alerts.truncate(MAX_ALERTS);
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -83,6 +112,8 @@ impl AppState {
             reference: Reference::default(),
             summary: Summary::default(),
             nodes: Vec::new(),
+            wallets: Vec::new(),
+            alerts: VecDeque::new(),
         }
     }
 }
@@ -98,7 +129,17 @@ pub async fn run(config: Config, client: reqwest::Client, discord: Discord, shar
         let previous = shared.read().await.clone();
         let mut state = poll(&config, &client, &previous).await;
         let alerts = evaluate(&config, &mut state, &mut trackers, Utc::now());
-        *shared.write().await = state.clone();
+        {
+            // Only touch the fields this loop owns; the wallet loop writes `wallets`.
+            let mut s = shared.write().await;
+            s.generated_at = state.generated_at;
+            s.reference = state.reference.clone();
+            s.summary = state.summary.clone();
+            s.nodes = state.nodes.clone();
+            for (embed, _) in &alerts {
+                record_alert(&mut s, embed);
+            }
+        }
 
         if first {
             first = false;

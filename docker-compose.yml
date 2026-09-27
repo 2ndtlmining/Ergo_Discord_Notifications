@@ -1,8 +1,27 @@
+# Start (and after any .env change):   docker compose up -d --build
+# or simply run:                        scripts/deploy.ps1
+#
+# .env is read when the container is (re)created, never baked into the image.
+# `restart: unless-stopped` brings the monitor back after a crash, a Docker
+# restart, or a reboot (as soon as Docker itself is running).
 services:
   ergo-monitor:
-    build: .
-    image: ergo-monitor
-    env_file: .env
+    build:
+      context: .
+      args:
+        GIT_SHA: ${GIT_SHA:-dev}
+        BUILT_AT: ${BUILT_AT:-unknown}
+    image: ergo-monitor:latest
+    container_name: ergo-monitor
+    env_file:
+      - path: .env
+        required: true
     ports:
-      - "7777:7777"
+      - "${HTTP_PORT:-7777}:${HTTP_PORT:-7777}"
     restart: unless-stopped
+    init: true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

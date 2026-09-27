@@ -23,6 +23,7 @@ COLORS = {
     "indexer-behind": (245, 165, 36),
     "syncing": (62, 139, 255),
     "unreachable": (139, 141, 152),
+    "received": (255, 90, 31),
 }
 
 
@@ -73,6 +74,12 @@ GLYPHS = {
         stroke(d, [(4.8, 18.5), (4.8, 14.4), (8.8, 14.4)]),
     ),
     "unreachable": lambda d: (stroke(d, [(12, 6), (12, 13.5)]), dot(d, 12, 18)),
+    # Arrow down into a tray.
+    "received": lambda d: (
+        stroke(d, [(12, 3.5), (12, 13.5)]),
+        stroke(d, [(7.5, 9.5), (12, 14), (16.5, 9.5)]),
+        stroke(d, [(4, 15), (4, 19.5), (20, 19.5), (20, 15)]),
+    ),
 }
 
 

@@ -4,6 +4,7 @@ mod discord;
 mod explorer;
 mod monitor;
 mod node;
+mod wallet;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -66,14 +67,16 @@ async fn main() -> Result<()> {
     let shared: Shared = Arc::new(RwLock::new(AppState::new(COMMIT)));
     tokio::spawn(monitor::run(
         config.clone(),
-        client,
-        discord,
+        client.clone(),
+        discord.clone(),
         shared.clone(),
     ));
+    tokio::spawn(wallet::run(config.clone(), client, discord, shared.clone()));
 
     let app = Router::new()
         .route("/healthz", get(healthz))
         .route("/api/status", get(status))
+        .route("/api/alerts", get(alerts))
         .with_state(shared);
     let addr = SocketAddr::from(([0, 0, 0, 0], config.http_port));
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -87,6 +90,10 @@ async fn main() -> Result<()> {
 
 async fn status(State(shared): State<Shared>) -> Json<AppState> {
     Json(shared.read().await.clone())
+}
+
+async fn alerts(State(shared): State<Shared>) -> Json<Vec<monitor::AlertRecord>> {
+    Json(shared.read().await.alerts.iter().cloned().collect())
 }
 
 async fn healthz() -> Json<Value> {

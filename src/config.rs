@@ -21,6 +21,8 @@ pub struct Config {
     pub lag_threshold_blocks: u64,
     pub node_poll_seconds: u64,
     pub wallet_poll_seconds: u64,
+    /// Incoming transactions below this many ERG are not announced (dust).
+    pub wallet_min_alert_erg: f64,
     pub alert_cooldown_minutes: u64,
     pub http_port: u16,
     pub nodes: Vec<NodeConfig>,
@@ -71,6 +73,7 @@ impl Config {
             lag_threshold_blocks: number(&vars, "LAG_THRESHOLD_BLOCKS", 5)?,
             node_poll_seconds: number(&vars, "NODE_POLL_SECONDS", 30)?,
             wallet_poll_seconds: number(&vars, "WALLET_POLL_SECONDS", 300)?,
+            wallet_min_alert_erg: number(&vars, "WALLET_MIN_ALERT_ERG", 0.0)?,
             alert_cooldown_minutes: number(&vars, "ALERT_COOLDOWN_MINUTES", 30)?,
             http_port: number(&vars, "HTTP_PORT", 7777)?,
             nodes: nodes(&vars)?,
