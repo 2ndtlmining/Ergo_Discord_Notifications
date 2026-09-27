@@ -1,14 +1,22 @@
+mod alerts;
 mod config;
+mod discord;
+mod explorer;
+mod monitor;
+mod node;
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use axum::{routing::get, Json, Router};
+use axum::{extract::State, routing::get, Json, Router};
 use serde_json::{json, Value};
+use tokio::sync::RwLock;
 use tracing_subscriber::EnvFilter;
 
 use crate::config::Config;
+use crate::monitor::{AppState, Shared};
 
 /// Baked in by the Dockerfile's GIT_SHA / BUILT_AT build args.
 const COMMIT: &str = match option_env!("ERGO_MONITOR_COMMIT") {
@@ -44,7 +52,29 @@ async fn main() -> Result<()> {
     };
     log_config(&config);
 
-    let app = Router::new().route("/healthz", get(healthz));
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .connect_timeout(Duration::from_secs(5))
+        .user_agent(concat!("ergo-monitor/", env!("CARGO_PKG_VERSION")))
+        .build()?;
+    let discord = discord::Discord::new(
+        client.clone(),
+        config.discord_webhook_url.clone(),
+        config.discord_user.clone(),
+        config.discord_icon_base_url.clone(),
+    );
+    let shared: Shared = Arc::new(RwLock::new(AppState::new(COMMIT)));
+    tokio::spawn(monitor::run(
+        config.clone(),
+        client,
+        discord,
+        shared.clone(),
+    ));
+
+    let app = Router::new()
+        .route("/healthz", get(healthz))
+        .route("/api/status", get(status))
+        .with_state(shared);
     let addr = SocketAddr::from(([0, 0, 0, 0], config.http_port));
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!("ergo-monitor {COMMIT} listening on http://{addr}");
@@ -53,6 +83,10 @@ async fn main() -> Result<()> {
         .await?;
     tracing::info!("shut down cleanly");
     Ok(())
+}
+
+async fn status(State(shared): State<Shared>) -> Json<AppState> {
+    Json(shared.read().await.clone())
 }
 
 async fn healthz() -> Json<Value> {
