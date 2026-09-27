@@ -12,6 +12,7 @@ pub fn color(condition: &str) -> u32 {
         "down" => 0xE5484D,
         "behind" | "indexer-behind" => 0xF5A524,
         "syncing" => 0x3E8BFF,
+        "received" => 0xFF5A1F,
         _ => 0x8B8D98,
     }
 }
