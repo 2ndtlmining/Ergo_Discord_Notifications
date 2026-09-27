@@ -1,0 +1,8 @@
+services:
+  ergo-monitor:
+    build: .
+    image: ergo-monitor
+    env_file: .env
+    ports:
+      - "7777:7777"
+    restart: unless-stopped
