@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ergo Monitor</title>
+<meta name="color-scheme" content="dark light">
+<link rel="icon" id="favicon" href="data:,">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Condensed:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header class="bar">
+  <div class="brand">
+    <svg class="mark" viewBox="0 0 24 24" aria-hidden="true"><path d="M2 13h5l2.5-6 4 11 2.5-7H22"/></svg>
+    <span>Ergo Monitor</span>
+  </div>
+  <div class="bar-right">
+    <span class="health" id="health" role="status">Connecting</span>
+    <span class="live" id="live"><i></i><span id="updated">waiting for first check</span></span>
+    <button class="icon-btn" id="theme" type="button" aria-label="Switch to light theme"></button>
+  </div>
+</header>
+
+<main>
+  <section class="tip" aria-labelledby="tip-title">
+    <div class="tip-head">
+      <div>
+        <h1 id="tip-title">Chain tip</h1>
+        <p class="tip-height" id="tip-height">&nbsp;</p>
+      </div>
+      <dl class="sources" id="sources"></dl>
+    </div>
+    <div class="rail-wrap">
+      <div class="rail" id="rail" aria-label="How far each node is from the chain tip"></div>
+      <div class="rail-axis" id="rail-axis" aria-hidden="true"></div>
+      <p class="rail-offline" id="rail-offline" hidden></p>
+    </div>
+  </section>
+
+  <section class="nodes" aria-labelledby="nodes-title">
+    <div class="section-head">
+      <h2 id="nodes-title">Nodes</h2>
+      <div class="filters">
+        <div class="seg" role="group" aria-label="Filter nodes">
+          <button type="button" data-filter="all" aria-pressed="true">All</button>
+          <button type="button" data-filter="problems" aria-pressed="false">Needs attention</button>
+        </div>
+        <label class="search">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+          <input id="search" type="search" placeholder="Find a node" autocomplete="off">
+        </label>
+      </div>
+    </div>
+    <div class="table" role="table" aria-label="Nodes">
+      <div class="thead" role="row">
+        <span role="columnheader">Node</span>
+        <span role="columnheader">Status</span>
+        <span role="columnheader" class="num">Block height</span>
+        <span role="columnheader" class="num">Indexed</span>
+        <span role="columnheader" class="num">Peers</span>
+        <span role="columnheader" class="num">Response</span>
+        <span role="columnheader"><span class="sr">Details</span></span>
+      </div>
+      <div id="node-rows"></div>
+    </div>
+    <p class="empty" id="nodes-empty" hidden></p>
+  </section>
+
+  <div class="lower">
+    <section class="wallets" aria-labelledby="wallets-title">
+      <div class="section-head"><h2 id="wallets-title">Wallets</h2></div>
+      <div id="wallet-rows"></div>
+    </section>
+    <section class="alerts" aria-labelledby="alerts-title">
+      <div class="section-head"><h2 id="alerts-title">Recent alerts</h2></div>
+      <ol id="alert-list" class="alert-list"></ol>
+    </section>
+  </div>
+</main>
+
+<footer class="foot" id="foot"></footer>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<script src="app.js"></script>
+</body>
+</html>
