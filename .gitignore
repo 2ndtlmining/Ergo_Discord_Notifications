@@ -1,1 +1,11 @@
+# Secrets / local test config: never commit
 .env
+.env.*
+*.env
+!.env.example
+
+# Build output / local artifacts
+target/
+.lock-out/
+*.log
+__pycache__/
