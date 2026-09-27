@@ -54,9 +54,40 @@ pub fn record_alert(state: &mut AppState, embed: &Embed) {
         kind: embed.icon.clone(),
         headline: embed.author.clone(),
         subject: embed.title.clone(),
-        detail: embed.description.replace("**", ""),
+        detail: plain_text(&embed.description),
     });
     state.alerts.truncate(MAX_ALERTS);
+}
+
+/// Discord markdown to plain text: drops `**` and turns `[text](url)` into `text`.
+fn plain_text(md: &str) -> String {
+    let mut out = String::new();
+    let mut rest = md.replace("**", "");
+    while let Some(open) = rest.find('[') {
+        let Some(mid) = rest[open..].find("](").map(|i| open + i) else {
+            break;
+        };
+        let Some(close) = rest[mid..].find(')').map(|i| mid + i) else {
+            break;
+        };
+        out.push_str(&rest[..open]);
+        out.push_str(&rest[open + 1..mid]);
+        rest = rest[close + 1..].to_string();
+    }
+    out.push_str(&rest);
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn strips_discord_markdown() {
+        assert_eq!(
+            super::plain_text("**Down** see [View transaction](https://x/y) now"),
+            "Down see View transaction now"
+        );
+        assert_eq!(super::plain_text("no links"), "no links");
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize)]

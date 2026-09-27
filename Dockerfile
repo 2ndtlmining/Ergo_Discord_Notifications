@@ -17,6 +17,7 @@ RUN rustup component add rustfmt clippy
 
 COPY Cargo.toml Cargo.lock* ./
 COPY src ./src
+COPY web ./web
 
 ARG GIT_SHA=dev
 ARG BUILT_AT=unknown
@@ -57,6 +58,17 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     cargo fmt --all -- --check \
  && cargo clippy --all-targets --locked -- -D warnings \
  && cargo test --locked
+
+# ---------- preview ----------
+# Dashboard with fixed fake data (every node condition), no polling or Discord.
+#   scripts/preview.ps1   ->  http://localhost:7777
+FROM debian:bookworm-slim AS preview
+RUN useradd --create-home --shell /usr/sbin/nologin ergo
+COPY --from=build /out/ergo-monitor /usr/local/bin/ergo-monitor
+USER ergo
+ENV HTTP_PORT=7777
+EXPOSE 7777
+CMD ["/usr/local/bin/ergo-monitor", "preview"]
 
 # ---------- runtime ----------
 FROM debian:bookworm-slim AS runtime

@@ -4,6 +4,7 @@ mod discord;
 mod explorer;
 mod monitor;
 mod node;
+mod preview;
 mod wallet;
 
 use std::net::SocketAddr;
@@ -11,7 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use axum::{extract::State, routing::get, Json, Router};
+use axum::{extract::State, http::header, response::IntoResponse, routing::get, Json, Router};
 use serde_json::{json, Value};
 use tokio::sync::RwLock;
 use tracing_subscriber::EnvFilter;
@@ -51,7 +52,10 @@ async fn main() -> Result<()> {
             std::process::exit(2);
         }
     };
-    log_config(&config);
+    let preview = std::env::args().nth(1).as_deref() == Some("preview");
+    if !preview {
+        log_config(&config);
+    }
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
@@ -64,16 +68,31 @@ async fn main() -> Result<()> {
         config.discord_user.clone(),
         config.discord_icon_base_url.clone(),
     );
-    let shared: Shared = Arc::new(RwLock::new(AppState::new(COMMIT)));
-    tokio::spawn(monitor::run(
-        config.clone(),
-        client.clone(),
-        discord.clone(),
-        shared.clone(),
-    ));
-    tokio::spawn(wallet::run(config.clone(), client, discord, shared.clone()));
+    let shared: Shared = if preview {
+        tracing::info!("preview mode: fake data, no polling, no Discord");
+        Arc::new(RwLock::new(preview::state(COMMIT)))
+    } else {
+        let shared: Shared = Arc::new(RwLock::new(AppState::new(COMMIT)));
+        tokio::spawn(monitor::run(
+            config.clone(),
+            client.clone(),
+            discord.clone(),
+            shared.clone(),
+        ));
+        tokio::spawn(wallet::run(config.clone(), client, discord, shared.clone()));
+        shared
+    };
 
     let app = Router::new()
+        .route("/", get(|| asset("text/html; charset=utf-8", INDEX_HTML)))
+        .route(
+            "/app.css",
+            get(|| asset("text/css; charset=utf-8", APP_CSS)),
+        )
+        .route(
+            "/app.js",
+            get(|| asset("text/javascript; charset=utf-8", APP_JS)),
+        )
         .route("/healthz", get(healthz))
         .route("/api/status", get(status))
         .route("/api/alerts", get(alerts))
@@ -86,6 +105,21 @@ async fn main() -> Result<()> {
         .await?;
     tracing::info!("shut down cleanly");
     Ok(())
+}
+
+// The dashboard is compiled into the binary; no files needed at runtime.
+const INDEX_HTML: &str = include_str!("../web/index.html");
+const APP_CSS: &str = include_str!("../web/app.css");
+const APP_JS: &str = include_str!("../web/app.js");
+
+async fn asset(content_type: &'static str, body: &'static str) -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, content_type),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        body,
+    )
 }
 
 async fn status(State(shared): State<Shared>) -> Json<AppState> {
