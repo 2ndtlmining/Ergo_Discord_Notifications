@@ -10,7 +10,7 @@ use tokio::sync::RwLock;
 
 use crate::alerts::{human_duration, Event, Tracker};
 use crate::config::Config;
-use crate::discord::{self, Discord, Embed};
+use crate::discord::{Discord, Embed};
 use crate::explorer::{self, ExplorerState};
 use crate::node::{self, Health};
 
@@ -245,21 +245,25 @@ fn evaluate(
     {
         out.push(if explorers_ok {
             (
-                embed(
-                    "✅ Explorers reachable again",
-                    "Lag checks have resumed.",
-                    discord::GREEN,
-                ),
+                Embed::new("ok", "Explorers reachable", "Reference height restored")
+                    .description("Lag checks have resumed."),
                 false,
             )
         } else {
             (
-                embed(
-                    "⚠️ Both explorers unreachable",
-                    "Mainnet and P2P explorer APIs are not responding. Node lag alerts are \
-                     paused until one is back; down alerts still work.\n\
-                     Runbook: `docs/runbooks/explorers-unreachable.md`",
-                    discord::GREY,
+                Embed::new(
+                    "unreachable",
+                    "Explorers unreachable",
+                    "No reference height",
+                )
+                .description(
+                    "Mainnet and P2P explorer APIs are not responding. Lag alerts are \
+                         paused until one is back; down alerts still work.",
+                )
+                .field(
+                    "Runbook",
+                    "`docs/runbooks/explorers-unreachable.md`",
+                    false,
                 ),
                 true,
             )
@@ -275,53 +279,34 @@ fn evaluate(
             } else {
                 cooldown
             };
+            let tip = state.reference.height;
             match tracker.observe(n.condition, now, CONFIRM_AFTER, remind) {
                 Some(Event::Changed { from, to, lasted }) if to == "ok" => out.push((
-                    embed(
-                        &format!("✅ {}: recovered", n.name),
-                        &format!(
-                            "Back in sync{} after being **{}** for {}.",
-                            n.full_height
-                                .map(|h| format!(" at height {h}"))
-                                .unwrap_or_default(),
-                            label(&from).to_lowercase(),
-                            human_duration(lasted)
-                        ),
-                        discord::GREEN,
-                    ),
+                    Embed::new("ok", "Recovered", &n.name).description(&format!(
+                        "Back in sync{} after being {} for {}.",
+                        n.full_height
+                            .map(|h| format!(" at height **{h}**"))
+                            .unwrap_or_default(),
+                        label(&from).to_lowercase(),
+                        human_duration(lasted)
+                    )),
                     false,
                 )),
                 Some(Event::Changed { from, .. }) => {
-                    let mut body = problem_body(n, state.reference.height);
+                    let mut e = problem_embed(n, label(n.condition), tip);
                     if from != "ok" {
-                        body.push_str(&format!("\nPreviously: {}", label(&from).to_lowercase()));
+                        e = e.field("Previously", label(&from), true);
                     }
-                    out.push((
-                        embed(
-                            &format!("{} {}: {}", emoji(n.condition), n.name, label(n.condition)),
-                            &body,
-                            color(n.condition),
-                        ),
-                        true,
-                    ));
+                    out.push((e, true));
                 }
-                Some(Event::Reminder { since, .. }) => out.push((
-                    embed(
-                        &format!(
-                            "{} {}: still {}",
-                            emoji(n.condition),
-                            n.name,
-                            label(n.condition).to_lowercase()
-                        ),
-                        &format!(
-                            "For {}.\n{}",
-                            human_duration(now - since),
-                            problem_body(n, state.reference.height)
-                        ),
-                        color(n.condition),
-                    ),
-                    n.condition != "syncing",
-                )),
+                Some(Event::Reminder { since, .. }) => {
+                    let author = format!(
+                        "Still {} · {}",
+                        label(n.condition).to_lowercase(),
+                        human_duration(now - since)
+                    );
+                    out.push((problem_embed(n, &author, tip), n.condition != "syncing"));
+                }
                 None => {}
             }
         }
@@ -330,95 +315,56 @@ fn evaluate(
     out
 }
 
-fn problem_body(n: &NodeState, tip: Option<u64>) -> String {
-    let mut s = format!("**{}**", n.detail);
-    let h = |v: Option<u64>| v.map(|x| x.to_string()).unwrap_or("?".into());
+fn problem_embed(n: &NodeState, author: &str, tip: Option<u64>) -> Embed {
+    let h = |v: Option<u64>| v.map(|x| x.to_string()).unwrap_or("n/a".into());
+    let mut e = Embed::new(n.condition, author, &n.name).description(&format!("**{}**", n.detail));
     if n.condition != "down" {
-        s.push_str(&format!(
-            "\nNode height {} · Indexed {} · Chain tip {}",
-            h(n.full_height),
-            n.indexed_height
-                .map(|x| x.to_string())
-                .unwrap_or("n/a".into()),
-            h(tip)
-        ));
+        e = e
+            .field("Node height", &h(n.full_height), true)
+            .field("Indexed", &h(n.indexed_height), true)
+            .field("Chain tip", &h(tip), true);
     }
-    s.push_str(&format!("\nNode: `{}`", n.url));
+    e = e.field("Endpoint", &format!("`{}`", n.url), false);
     if let Some(rb) = n.runbook {
-        s.push_str(&format!("\nRunbook: `{rb}`"));
+        e = e.field("Runbook", &format!("`{rb}`"), false);
     }
-    s
+    e
 }
 
 fn startup_summary(state: &AppState) -> Embed {
-    let mut lines = vec![format!(
-        "Chain tip: **{}**",
+    let s = &state.summary;
+    let icon = if s.ok == s.total { "ok" } else { "behind" };
+    let mut e = Embed::new(
+        icon,
+        "Ergo Monitor started",
+        &format!("{} of {} nodes healthy", s.ok, s.total),
+    )
+    .description(&format!(
+        "Chain tip **{}**",
         state
             .reference
             .height
             .map(|h| h.to_string())
             .unwrap_or("unknown (explorers unreachable)".into())
-    )];
+    ));
     for n in &state.nodes {
-        lines.push(format!(
-            "{} **{}**: {}",
-            emoji(n.condition),
-            n.name,
-            n.detail
-        ));
+        e = e.field(
+            &n.name,
+            &format!("`{}`  {}", label(n.condition), n.detail),
+            false,
+        );
     }
-    let healthy = state.summary.ok == state.summary.total;
-    embed(
-        &format!(
-            "Ergo Monitor started · {}/{} nodes healthy",
-            state.summary.ok, state.summary.total
-        ),
-        &lines.join("\n"),
-        if healthy {
-            discord::GREEN
-        } else {
-            discord::AMBER
-        },
-    )
-}
-
-fn embed(title: &str, description: &str, color: u32) -> Embed {
-    Embed {
-        title: title.into(),
-        description: description.into(),
-        color,
-    }
-}
-
-fn emoji(condition: &str) -> &'static str {
-    match condition {
-        "ok" => "✅",
-        "down" => "🔴",
-        "behind" => "🟠",
-        "indexer-behind" => "🟡",
-        "syncing" => "🔵",
-        _ => "⚪",
-    }
+    e
 }
 
 fn label(condition: &str) -> &'static str {
     match condition {
         "ok" => "OK",
-        "down" => "DOWN",
-        "behind" => "BEHIND",
-        "indexer-behind" => "INDEXER BEHIND",
-        "syncing" => "SYNCING",
-        "unreachable" => "UNREACHABLE",
-        _ => "UNKNOWN",
-    }
-}
-
-fn color(condition: &str) -> u32 {
-    match condition {
-        "ok" => discord::GREEN,
-        "down" => discord::RED,
-        "behind" | "indexer-behind" => discord::AMBER,
-        "syncing" => discord::BLUE,
-        _ => discord::GREY,
+        "down" => "Down",
+        "behind" => "Behind",
+        "indexer-behind" => "Indexer behind",
+        "syncing" => "Syncing",
+        "unreachable" => "Unreachable",
+        _ => "Unknown",
     }
 }

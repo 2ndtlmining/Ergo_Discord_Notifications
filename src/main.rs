@@ -61,6 +61,7 @@ async fn main() -> Result<()> {
         client.clone(),
         config.discord_webhook_url.clone(),
         config.discord_user.clone(),
+        config.discord_icon_base_url.clone(),
     );
     let shared: Shared = Arc::new(RwLock::new(AppState::new(COMMIT)));
     tokio::spawn(monitor::run(

@@ -15,6 +15,7 @@ pub struct Config {
     pub discord_webhook_url: Option<String>,
     #[serde(skip)]
     pub discord_user: Option<String>,
+    pub discord_icon_base_url: String,
     pub explorer_mainnet_api: String,
     pub explorer_p2p_api: String,
     pub lag_threshold_blocks: u64,
@@ -57,6 +58,10 @@ impl Config {
         let config = Config {
             discord_webhook_url: get("DISCORD_WEBHOOK_URL"),
             discord_user: get("DISCORD_USER"),
+            // Discord fetches the icons itself, so they must be publicly reachable.
+            discord_icon_base_url: base_url(get("DISCORD_ICON_BASE_URL").unwrap_or(
+                "https://raw.githubusercontent.com/2ndtlmining/Ergo_Discord_Notifications/main/assets/discord".into(),
+            )),
             explorer_mainnet_api: base_url(
                 get("EXPLORER_MAINNET_API").unwrap_or("https://api.ergoplatform.com".into()),
             ),
