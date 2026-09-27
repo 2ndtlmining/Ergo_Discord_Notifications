@@ -60,7 +60,7 @@ pub fn state(commit: &'static str) -> AppState {
         };
 
     let mut grid = node("grid-bot", "Grid Bot", "192.168.1.10", "ok", "In sync");
-    grid.wallet_address = Some("9eoM6oqHBziMxQPUPvhoHuLBRZpdnRMnqedcuFmj6UrQFXmYeHX".into());
+    grid.wallet_address = Some("9fGridBotExampleAddressxxxxxxxxxxxxxxxxxxxxxxxxxxxx".into());
     let mut pool = node(
         "mining-pool",
         "Mining Pool",
@@ -117,7 +117,7 @@ pub fn state(commit: &'static str) -> AppState {
         "down",
         "Connection refused: host is up but the node API is not listening (node process stopped?)",
     );
-    duck.wallet_address = Some("9g67ioB5MGLgmv7zLGQvLV7kCY1XHSe8W969snzccgo95M8Z856".into());
+    duck.wallet_address = Some("9fDuckpoolsExampleAddressxxxxxxxxxxxxxxxxxxxxxxxxxx".into());
     duck.full_height = Some(TIP - 310);
     duck.headers_height = None;
     duck.indexed_height = None;

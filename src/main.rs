@@ -12,7 +12,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use axum::{extract::State, http::header, response::IntoResponse, routing::get, Json, Router};
+use axum::{
+    extract::{Path, State},
+    http::{header, StatusCode},
+    response::IntoResponse,
+    routing::get,
+    Json, Router,
+};
 use serde_json::{json, Value};
 use tokio::sync::RwLock;
 use tracing_subscriber::EnvFilter;
@@ -96,6 +102,7 @@ async fn main() -> Result<()> {
         .route("/healthz", get(healthz))
         .route("/api/status", get(status))
         .route("/api/alerts", get(alerts))
+        .route("/api/nodes/{id}", get(node))
         .with_state(shared);
     let addr = SocketAddr::from(([0, 0, 0, 0], config.http_port));
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -124,6 +131,26 @@ async fn asset(content_type: &'static str, body: &'static str) -> impl IntoRespo
 
 async fn status(State(shared): State<Shared>) -> Json<AppState> {
     Json(shared.read().await.clone())
+}
+
+async fn node(
+    State(shared): State<Shared>,
+    Path(id): Path<String>,
+) -> Result<Json<monitor::NodeState>, (StatusCode, Json<Value>)> {
+    let state = shared.read().await;
+    state
+        .nodes
+        .iter()
+        .find(|n| n.id == id)
+        .cloned()
+        .map(Json)
+        .ok_or_else(|| {
+            let known: Vec<_> = state.nodes.iter().map(|n| n.id.as_str()).collect();
+            (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": format!("no node with id '{id}'"), "known_ids": known })),
+            )
+        })
 }
 
 async fn alerts(State(shared): State<Shared>) -> Json<Vec<monitor::AlertRecord>> {
