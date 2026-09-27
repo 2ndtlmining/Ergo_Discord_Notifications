@@ -9,3 +9,6 @@ target/
 .lock-out/
 *.log
 __pycache__/
+
+# Private infrastructure notes (hosts, SSH users): see docs/infrastructure.example.md
+docs/infrastructure.md

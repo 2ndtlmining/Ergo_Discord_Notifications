@@ -335,8 +335,8 @@ mod tests {
     #[test]
     fn shortens_addresses() {
         assert_eq!(
-            short("9gnNPUti6LfZA2xJQS25Urv1gPinNhVzo6XWacxBi3swpHimtcn"),
-            "9gnNPUti…Himtcn"
+            short("9fExampleAddressForTestsxxxxxxxxxxxxxxxxxxxxxAbCdEf"),
+            "9fExampl…AbCdEf"
         );
     }
 }
