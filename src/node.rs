@@ -1,13 +1,15 @@
 //! Polling a single Ergo node and deciding its health (#4).
 
 use std::fmt;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
 /// A node whose block processing trails its own headers by more than this
 /// is doing an initial sync rather than falling behind (~1 day of blocks).
 pub const SYNCING_GAP: u64 = 720;
+/// Nodes are on the LAN; a healthy one answers in milliseconds.
+const NODE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -31,8 +33,11 @@ struct IndexedHeight {
 #[derive(Debug, Clone)]
 pub struct Probe {
     pub info: NodeInfo,
-    /// `None` when the node has no extra index (`extraIndex = false`).
+    /// `None` when the node has no extra index (`extraIndex = false`), or
+    /// when the indexer request failed (see `indexer_error`).
     pub indexed_height: Option<u64>,
+    /// The indexer endpoint failed for a reason other than "not enabled".
+    pub indexer_error: Option<String>,
     pub latency_ms: u64,
 }
 
@@ -87,38 +92,56 @@ fn down_reason(e: &reqwest::Error) -> DownReason {
 }
 
 pub async fn probe(client: &reqwest::Client, url: &str) -> Result<Probe, DownReason> {
-    let started = Instant::now();
-    let info = client
-        .get(format!("{url}/info"))
-        .send()
-        .await
-        .and_then(|r| r.error_for_status())
-        .map_err(|e| down_reason(&e))?
-        .json::<NodeInfo>()
-        .await
-        .map_err(|e| DownReason::BadResponse(e.to_string()))?;
-    let latency_ms = started.elapsed().as_millis() as u64;
-
-    // Fails (400/404) on nodes without extraIndex; that is not an outage.
-    let indexed_height = match client
-        .get(format!("{url}/blockchain/indexedHeight"))
-        .send()
-        .await
-        .and_then(|r| r.error_for_status())
-    {
-        Ok(r) => r
+    // Both requests at once, so a slow indexer doesn't delay the poll (#25).
+    let info = async {
+        let started = Instant::now();
+        let info = client
+            .get(format!("{url}/info"))
+            .timeout(NODE_TIMEOUT)
+            .send()
+            .await
+            .and_then(|r| r.error_for_status())
+            .map_err(|e| down_reason(&e))?
+            .json::<NodeInfo>()
+            .await
+            .map_err(|e| DownReason::BadResponse(e.to_string()))?;
+        Ok::<_, DownReason>((info, started.elapsed().as_millis() as u64))
+    };
+    let indexed = async {
+        let resp = client
+            .get(format!("{url}/blockchain/indexedHeight"))
+            .timeout(NODE_TIMEOUT)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        if indexer_disabled(resp.status().as_u16()) {
+            return Ok(None);
+        }
+        resp.error_for_status()
+            .map_err(|e| e.to_string())?
             .json::<IndexedHeight>()
             .await
-            .ok()
-            .map(|h| h.indexed_height),
-        Err(_) => None,
+            .map(|h| Some(h.indexed_height))
+            .map_err(|e| format!("unexpected response: {e}"))
     };
-
+    let (info, indexed) = tokio::join!(info, indexed);
+    let (info, latency_ms) = info?;
+    let (indexed_height, indexer_error) = match indexed {
+        Ok(h) => (h, None),
+        Err(e) => (None, Some(e)),
+    };
     Ok(Probe {
         info,
         indexed_height,
+        indexer_error,
         latency_ms,
     })
+}
+
+/// Nodes without `extraIndex` don't serve the indexer routes. Only these
+/// statuses mean "no indexer"; timeouts and server errors are failures.
+fn indexer_disabled(status: u16) -> bool {
+    matches!(status, 400 | 404 | 501)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -231,6 +254,7 @@ mod tests {
                 ..Default::default()
             },
             indexed_height: indexed,
+            indexer_error: None,
             latency_ms: 5,
         })
     }
@@ -272,6 +296,7 @@ mod tests {
                 ..Default::default()
             },
             indexed_height: Some(0),
+            indexer_error: None,
             latency_ms: 2,
         });
         assert_eq!(
@@ -291,6 +316,12 @@ mod tests {
             classify(&up(1_882_059, 1_882_064, None), tip, 5),
             Health::Ok
         );
+    }
+
+    #[test]
+    fn only_not_found_means_no_indexer() {
+        assert!(indexer_disabled(404) && indexer_disabled(400));
+        assert!(!indexer_disabled(500) && !indexer_disabled(503) && !indexer_disabled(200));
     }
 
     #[test]

@@ -26,7 +26,9 @@ pub type Shared = Arc<RwLock<AppState>>;
 pub struct AppState {
     pub schema_version: u32,
     pub commit: &'static str,
+    pub started_at: DateTime<Utc>,
     pub generated_at: Option<DateTime<Utc>>,
+    pub settings: Settings,
     pub reference: Reference,
     pub summary: Summary,
     pub nodes: Vec<NodeState>,
@@ -36,6 +38,29 @@ pub struct AppState {
     /// Served separately at /api/alerts.
     #[serde(skip)]
     pub alerts: VecDeque<AlertRecord>,
+    #[serde(skip)]
+    next_alert_id: u64,
+    /// False in preview mode, where the data is fixed and never refreshed.
+    #[serde(skip)]
+    pub live: bool,
+}
+
+/// The settings the dashboard and API clients need to interpret the data.
+#[derive(Debug, Clone, Serialize)]
+pub struct Settings {
+    pub lag_threshold_blocks: u64,
+    pub node_poll_seconds: u64,
+    pub wallet_poll_seconds: u64,
+}
+
+impl From<&Config> for Settings {
+    fn from(c: &Config) -> Self {
+        Self {
+            lag_threshold_blocks: c.lag_threshold_blocks,
+            node_poll_seconds: c.node_poll_seconds,
+            wallet_poll_seconds: c.wallet_poll_seconds,
+        }
+    }
 }
 
 const MAX_ALERTS: usize = 100;
@@ -43,16 +68,24 @@ const MAX_ALERTS: usize = 100;
 /// An alert as sent to Discord, kept in memory for the API and dashboard.
 #[derive(Debug, Clone, Serialize)]
 pub struct AlertRecord {
+    pub id: u64,
     pub at: DateTime<Utc>,
     /// Condition / icon name: ok, down, behind, indexer-behind, syncing, unreachable, received.
     pub kind: String,
     pub headline: String,
     pub subject: String,
     pub detail: String,
+    /// Discord delivery: pending | sent | failed | off (no webhook configured).
+    pub delivery: &'static str,
 }
 
-pub fn record_alert(state: &mut AppState, embed: &Embed) {
+/// Keeps an alert for the API and dashboard; returns its id for delivery tracking.
+pub fn record_alert(state: &mut AppState, embed: &Embed, delivery: &'static str) -> u64 {
+    state.next_alert_id += 1;
+    let id = state.next_alert_id;
     state.alerts.push_front(AlertRecord {
+        id,
+        delivery,
         at: Utc::now(),
         kind: embed.icon.clone(),
         headline: embed.author.clone(),
@@ -60,6 +93,7 @@ pub fn record_alert(state: &mut AppState, embed: &Embed) {
         detail: plain_text(&embed.description),
     });
     state.alerts.truncate(MAX_ALERTS);
+    id
 }
 
 /// Discord markdown to plain text: drops `**` and turns `[text](url)` into `text`.
@@ -83,6 +117,28 @@ fn plain_text(md: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn freshness_follows_the_poll_interval() {
+        use super::{AppState, Settings};
+        use chrono::Duration;
+        let settings = Settings {
+            lag_threshold_blocks: 5,
+            node_poll_seconds: 30,
+            wallet_poll_seconds: 300,
+        };
+        let mut s = AppState::new("test", settings);
+        let now = s.started_at;
+        // Before the first poll: fresh during the grace period (3 x 30s + 30s).
+        assert!(s.is_fresh(now + Duration::seconds(100)));
+        assert!(!s.is_fresh(now + Duration::seconds(130)));
+        s.generated_at = Some(now + Duration::seconds(200));
+        assert!(s.is_fresh(now + Duration::seconds(300)));
+        assert!(!s.is_fresh(now + Duration::seconds(400)));
+        // Preview data never refreshes and is always "fresh".
+        s.live = false;
+        assert!(s.is_fresh(now + Duration::days(1)));
+    }
+
     #[test]
     fn strips_discord_markdown() {
         assert_eq!(
@@ -143,22 +199,42 @@ pub struct NodeState {
 }
 
 impl AppState {
-    pub fn new(commit: &'static str) -> Self {
+    pub fn new(commit: &'static str, settings: Settings) -> Self {
         Self {
             schema_version: 1,
             commit,
+            started_at: Utc::now(),
             generated_at: None,
+            settings,
             reference: Reference::default(),
             summary: Summary::default(),
             nodes: Vec::new(),
             wallets: Vec::new(),
             latest_release: None,
             alerts: VecDeque::new(),
+            next_alert_id: 0,
+            live: true,
         }
+    }
+
+    /// Whether the node poll loop is still producing fresh data (#23): false
+    /// when the last poll is older than three intervals, or when no poll has
+    /// finished that long after startup.
+    pub fn is_fresh(&self, now: DateTime<Utc>) -> bool {
+        if !self.live {
+            return true;
+        }
+        let limit = Duration::seconds(3 * self.settings.node_poll_seconds as i64 + 30);
+        now - self.generated_at.unwrap_or(self.started_at) <= limit
     }
 }
 
-pub async fn run(config: Config, client: reqwest::Client, discord: Discord, shared: Shared) {
+pub async fn run(
+    config: Config,
+    client: reqwest::Client,
+    discord: Discord,
+    shared: Shared,
+) -> &'static str {
     let mut trackers: HashMap<String, Tracker> = HashMap::new();
     let mut interval = tokio::time::interval(StdDuration::from_secs(config.node_poll_seconds));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -169,25 +245,28 @@ pub async fn run(config: Config, client: reqwest::Client, discord: Discord, shar
         let previous = shared.read().await.clone();
         let mut state = poll(&config, &client, &previous).await;
         let alerts = evaluate(&config, &mut state, &mut trackers, Utc::now());
-        {
+        let queued = {
             // Only touch the fields this loop owns; the wallet loop writes `wallets`.
             let mut s = shared.write().await;
             s.generated_at = state.generated_at;
             s.reference = state.reference.clone();
             s.summary = state.summary.clone();
             s.nodes = state.nodes.clone();
-            for (embed, _) in &alerts {
-                record_alert(&mut s, embed);
-            }
-        }
+            alerts
+                .into_iter()
+                .map(|(embed, ping)| {
+                    let id = record_alert(&mut s, &embed, discord.initial_delivery());
+                    (embed, ping, id)
+                })
+                .collect::<Vec<_>>()
+        };
 
+        // Queued, not awaited: a slow or rate-limited Discord never delays polling (#24).
         if first {
             first = false;
-            discord.send(&[startup_summary(&state)], false).await;
+            discord.send(vec![startup_summary(&state)], vec![], false);
         }
-        for (embed, ping) in alerts {
-            discord.send(&[embed], ping).await;
-        }
+        discord.send_alerts(queued);
     }
 }
 
@@ -239,11 +318,18 @@ async fn poll(config: &Config, client: &reqwest::Client, previous: &AppState) ->
 
     let mut nodes = Vec::new();
     for (cfg, task) in config.nodes.iter().zip(node_tasks) {
-        let probe = task
+        let mut probe = task
             .await
             .unwrap_or_else(|e| Err(node::DownReason::Unreachable(e.to_string())));
-        let health = node::classify(&probe, reference, config.lag_threshold_blocks);
         let prev = previous.nodes.iter().find(|p| p.id == cfg.id);
+        // A failed indexer request isn't "no indexer": judge on the last known
+        // indexed height rather than flipping to OK (#25).
+        if let Ok(p) = &mut probe {
+            if p.indexer_error.is_some() {
+                p.indexed_height = prev.and_then(|n| n.indexed_height);
+            }
+        }
+        let health = node::classify(&probe, reference, config.lag_threshold_blocks);
         let ok = probe.as_ref().ok();
         let info = ok.map(|p| &p.info);
         let full = info.and_then(|i| i.full_height);
@@ -296,7 +382,10 @@ async fn poll(config: &Config, client: &reqwest::Client, previous: &AppState) ->
             } else {
                 prev.and_then(|p| p.last_ok)
             },
-            last_error: probe.as_ref().err().map(|e| e.to_string()),
+            last_error: match &probe {
+                Err(e) => Some(e.to_string()),
+                Ok(p) => p.indexer_error.as_ref().map(|e| format!("Indexer: {e}")),
+            },
             runbook: health.runbook(),
         });
     }

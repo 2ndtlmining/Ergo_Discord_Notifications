@@ -83,6 +83,20 @@ impl Config {
         if config.node_poll_seconds == 0 || config.wallet_poll_seconds == 0 {
             bail!("NODE_POLL_SECONDS and WALLET_POLL_SECONDS must be greater than 0");
         }
+        // Upper bounds keep the duration maths from overflowing.
+        for (key, value, max) in [
+            ("NODE_POLL_SECONDS", config.node_poll_seconds, 3600),
+            ("WALLET_POLL_SECONDS", config.wallet_poll_seconds, 86_400),
+            (
+                "ALERT_COOLDOWN_MINUTES",
+                config.alert_cooldown_minutes,
+                10_080,
+            ),
+        ] {
+            if value > max {
+                bail!("{key}={value} is too large (maximum {max})");
+            }
+        }
         let mut ids = HashSet::new();
         for id in config.nodes.iter().map(|n| &n.id) {
             if !ids.insert(id) {
@@ -233,6 +247,7 @@ mod tests {
         assert!(err(&[("NODE_1_URL", "http://x")]).contains("NODE_1_NAME is missing"));
         assert!(err(&[("NODE_1_NAME", "A"), ("NODE_1_URL", "10.0.0.1:9053")]).contains("http://"));
         assert!(err(&[("LAG_THRESHOLD_BLOCKS", "five")]).contains("not a valid number"));
+        assert!(err(&[("ALERT_COOLDOWN_MINUTES", "99999999999")]).contains("too large"));
         assert!(err(&[
             ("NODE_1_NAME", "Grid Bot"),
             ("NODE_1_URL", "http://a"),

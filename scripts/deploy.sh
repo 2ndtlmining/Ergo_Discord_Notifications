@@ -31,6 +31,20 @@ BUILT_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 # up -d recreates the container, which re-reads .env (a plain restart does not).
 "${docker[@]}" compose up -d --force-recreate --remove-orphans
 
-port=$(sed -n 's/^HTTP_PORT=\([0-9][0-9]*\).*/\1/p' .env | head -n1)
-port=${port:-7777}
-echo "ergo-monitor $GIT_SHA is running: http://localhost:$port  (logs: ${docker[*]} compose logs -f)"
+# "Started" isn't "working": a bad .env makes the monitor exit and restart in
+# a loop. Wait for its own health check to pass before reporting success.
+echo "Waiting for the monitor to come up..."
+for _ in $(seq 1 20); do
+    if "${docker[@]}" compose exec -T ergo-monitor /usr/local/bin/ergo-monitor healthcheck >/dev/null 2>&1; then
+        port=$(sed -n 's/^HTTP_PORT=\([0-9][0-9]*\).*/\1/p' .env | head -n1)
+        port=${port:-7777}
+        echo "ergo-monitor $GIT_SHA is running: http://localhost:$port  (logs: ${docker[*]} compose logs -f)"
+        exit 0
+    fi
+    sleep 2
+done
+
+echo "ergo-monitor did not come up. Last log lines:" >&2
+"${docker[@]}" compose logs --tail 20 ergo-monitor >&2
+echo "Fix the problem above (often a typo in .env), then run scripts/deploy.sh again." >&2
+exit 1

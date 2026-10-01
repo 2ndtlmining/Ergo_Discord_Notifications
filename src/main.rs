@@ -22,10 +22,11 @@ use axum::{
 };
 use serde_json::{json, Value};
 use tokio::sync::RwLock;
+use tokio::task::JoinSet;
 use tracing_subscriber::EnvFilter;
 
 use crate::config::Config;
-use crate::monitor::{AppState, Shared};
+use crate::monitor::{AppState, Settings, Shared};
 
 /// Baked in by the Dockerfile's GIT_SHA / BUILT_AT build args.
 const COMMIT: &str = match option_env!("ERGO_MONITOR_COMMIT") {
@@ -69,25 +70,33 @@ async fn main() -> Result<()> {
         .connect_timeout(Duration::from_secs(5))
         .user_agent(concat!("ergo-monitor/", env!("CARGO_PKG_VERSION")))
         .build()?;
-    let discord = discord::Discord::new(
-        client.clone(),
-        config.discord_webhook_url.clone(),
-        config.discord_user.clone(),
-        config.discord_icon_base_url.clone(),
-    );
+    // Background loops run forever; if one stops or panics the process exits
+    // so Docker restarts it, instead of serving frozen data (#23).
+    let mut tasks: JoinSet<&'static str> = JoinSet::new();
     let shared: Shared = if preview {
         tracing::info!("preview mode: fake data, no polling, no Discord");
         Arc::new(RwLock::new(preview::state(COMMIT)))
     } else {
-        let shared: Shared = Arc::new(RwLock::new(AppState::new(COMMIT)));
-        tokio::spawn(monitor::run(
+        let shared: Shared = Arc::new(RwLock::new(AppState::new(COMMIT, Settings::from(&config))));
+        let (discord, worker) = discord::Discord::new(
+            client.clone(),
+            config.discord_webhook_url.clone(),
+            config.discord_user.clone(),
+            config.discord_icon_base_url.clone(),
+            shared.clone(),
+        );
+        tasks.spawn(async move {
+            worker.run().await;
+            "discord delivery"
+        });
+        tasks.spawn(monitor::run(
             config.clone(),
             client.clone(),
             discord.clone(),
             shared.clone(),
         ));
-        tokio::spawn(release::run(client.clone(), shared.clone()));
-        tokio::spawn(wallet::run(config.clone(), client, discord, shared.clone()));
+        tasks.spawn(release::run(client.clone(), shared.clone()));
+        tasks.spawn(wallet::run(config.clone(), client, discord, shared.clone()));
         shared
     };
 
@@ -109,9 +118,17 @@ async fn main() -> Result<()> {
     let addr = SocketAddr::from(([0, 0, 0, 0], config.http_port));
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!("ergo-monitor {COMMIT} listening on http://{addr}");
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    let server = axum::serve(listener, app).with_graceful_shutdown(shutdown_signal());
+    tokio::select! {
+        result = server => result?,
+        Some(ended) = tasks.join_next() => {
+            match ended {
+                Ok(name) => tracing::error!("{name} loop stopped unexpectedly; exiting so Docker restarts the monitor"),
+                Err(e) => tracing::error!("background task crashed ({e}); exiting so Docker restarts the monitor"),
+            }
+            std::process::exit(1);
+        }
+    }
     tracing::info!("shut down cleanly");
     Ok(())
 }
@@ -159,8 +176,23 @@ async fn alerts(State(shared): State<Shared>) -> Json<Vec<monitor::AlertRecord>>
     Json(shared.read().await.alerts.iter().cloned().collect())
 }
 
-async fn healthz() -> Json<Value> {
-    Json(json!({ "status": "ok", "commit": COMMIT, "built_at": BUILT_AT }))
+/// 503 when the node poll loop has stopped producing fresh data, so the
+/// Docker health check (and `deploy.sh`) can tell (#23).
+async fn healthz(State(shared): State<Shared>) -> (StatusCode, Json<Value>) {
+    let s = shared.read().await;
+    let fresh = s.is_fresh(chrono::Utc::now());
+    let code = if fresh {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    let body = json!({
+        "status": if fresh { "ok" } else { "stale" },
+        "commit": COMMIT,
+        "built_at": BUILT_AT,
+        "last_poll": s.generated_at,
+    });
+    (code, Json(body))
 }
 
 /// `ergo-monitor healthcheck`, used by Docker's HEALTHCHECK (the image has no curl).
