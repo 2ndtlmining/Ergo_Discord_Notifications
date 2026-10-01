@@ -29,7 +29,7 @@ scripts/deploy.ps1            # or: docker compose up -d --build
 
 Open **http://localhost:7777**. Discord receives a startup summary within 30 seconds.
 
-On Linux/macOS, use `cp .env.example .env` and `docker compose up -d --build`.
+On Linux/macOS, use `cp .env.example .env` and `scripts/deploy.sh`.
 
 ## Where your node IPs and wallets go: `.env`
 
@@ -67,8 +67,12 @@ WALLET_1_NAME=Mining
 WALLET_1_ADDRESS=9h...
 ```
 
-After editing `.env`, run `scripts/deploy.ps1` (or `docker compose up -d`) again.
-A plain `docker restart` does **not** re-read `.env`.
+After editing `.env`, run `scripts/deploy.ps1` (Windows) or `scripts/deploy.sh`
+(Linux/macOS) again. A plain `docker restart` does **not** re-read `.env`.
+
+To update to the latest code on Linux, run `scripts/deploy.sh --pull`: it does
+a `git pull`, rebuilds, and restarts. It uses `sudo` for Docker only if your
+user can't reach Docker without it. On Windows, `git pull` then `scripts/deploy.ps1`.
 
 ### All settings
 
