@@ -158,10 +158,16 @@ async fn fetch(
     Ok((balance.nano_ergs, page))
 }
 
-pub async fn run(config: Config, client: reqwest::Client, discord: Discord, shared: Shared) {
+pub async fn run(
+    config: Config,
+    client: reqwest::Client,
+    discord: Discord,
+    shared: Shared,
+) -> &'static str {
     let wallets = targets(&config);
     if wallets.is_empty() {
-        return;
+        // Nothing to watch; stay alive so the supervisor doesn't treat this as a crash.
+        return std::future::pending().await;
     }
     shared.write().await.wallets = wallets.clone();
 
@@ -218,16 +224,18 @@ pub async fn run(config: Config, client: reqwest::Client, discord: Discord, shar
             }
         }
 
-        {
+        let queued = {
             let mut state = shared.write().await;
             state.wallets = updated;
-            for embed in &alerts {
-                record_alert(&mut state, embed);
-            }
-        }
-        for embed in alerts {
-            discord.send(&[embed], true).await;
-        }
+            alerts
+                .into_iter()
+                .map(|embed| {
+                    let id = record_alert(&mut state, &embed, discord.initial_delivery());
+                    (embed, true, id)
+                })
+                .collect()
+        };
+        discord.send_alerts(queued);
     }
 }
 

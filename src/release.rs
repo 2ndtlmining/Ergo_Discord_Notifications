@@ -104,7 +104,7 @@ async fn fetch(client: &reqwest::Client) -> Result<LatestRelease, String> {
     summarize(releases).ok_or_else(|| "no stable release found".into())
 }
 
-pub async fn run(client: reqwest::Client, shared: Shared) {
+pub async fn run(client: reqwest::Client, shared: Shared) -> &'static str {
     loop {
         let wait = match fetch(&client).await {
             Ok(latest) => {

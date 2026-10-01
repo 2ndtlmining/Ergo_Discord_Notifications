@@ -41,10 +41,10 @@ All responses are JSON. The API is stable within `schema_version` 1.
 
 | Endpoint | Returns |
 |---|---|
-| `GET /api/status` | Everything: reference height, summary, nodes, wallets, latest node release |
+| `GET /api/status` | Everything: reference height, summary, nodes, wallets, latest node release, `settings` |
 | `GET /api/nodes/{id}` | One node (404 lists the known ids) |
-| `GET /api/alerts` | Last 100 alerts sent, newest first |
-| `GET /healthz` | `{"status":"ok","commit":…}` |
+| `GET /api/alerts` | Last 100 alerts, newest first; `delivery` is `pending`, `sent`, `failed` or `off` (no webhook) |
+| `GET /healthz` | `{"status":"ok","commit":…,"last_poll":…}`; **503** with `"stale"` when the node poll has stopped (no poll for 3 intervals + 30s) |
 
 ```sh
 # Which nodes are unhealthy, and why?
@@ -69,6 +69,8 @@ Node fields (`/api/status` `.nodes[]`):
 | `last_ok`, `last_error` | Last successful response; last failure text |
 | `runbook` | Path of the runbook for the current condition, or null |
 
+`settings` holds `lag_threshold_blocks`, `node_poll_seconds` and `wallet_poll_seconds`.
+
 `reference.height` is the highest height reported by the reachable explorers;
 null means both are unreachable, and then lag can't be judged (`unknown`).
 
@@ -86,6 +88,9 @@ check succeeds.
   processed blocks (initial sync or resync).
 - **behind**: node block height more than `LAG_THRESHOLD_BLOCKS` (5) behind the tip.
 - **indexer-behind**: node in sync, but `indexedHeight` more than 5 behind.
+  Only HTTP 400/404/501 from `/blockchain/indexedHeight` means "no indexer";
+  if the request fails otherwise, the last known indexed height is used and
+  `last_error` starts with `Indexer:`.
 - Alerts need the same condition on 2 checks in a row (`src/alerts.rs`).
 
 ## Code layout

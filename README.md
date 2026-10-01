@@ -135,7 +135,7 @@ Run these in the project folder on the machine that runs the monitor.
 
 | You want to | Linux / macOS | Windows |
 |---|---|---|
-| Get the latest code from GitHub | `scripts/deploy.sh --pull` | `git pull` then `scripts/deploy.ps1` |
+| Get the latest code from GitHub | `scripts/deploy.sh --pull` | `scripts/deploy.ps1 -Pull` |
 | Apply changes you made to `.env` | `scripts/deploy.sh` | `scripts/deploy.ps1` |
 
 Both scripts rebuild the image and recreate the container, so new code and
@@ -144,7 +144,13 @@ build after an update compiles the code and can take a few minutes; later
 ones are faster. `deploy.sh` uses `sudo` for Docker only when your user
 can't reach Docker without it.
 
-Check that the update worked:
+The scripts then wait for the monitor's health check. You'll see either
+`ergo-monitor <commit> is running`, or `ergo-monitor did not come up` followed
+by the last log lines, which usually name the problem (for example
+`NODE_1_URL='192.168.1.10:9053' must start with http://`). Fix `.env` and run
+the script again.
+
+To check it yourself later:
 
 ```sh
 curl -s localhost:7777/healthz        # "commit" should match: git log --oneline -1

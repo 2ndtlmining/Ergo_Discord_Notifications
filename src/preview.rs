@@ -6,7 +6,7 @@ use chrono::{Duration, Utc};
 
 use crate::discord::Embed;
 use crate::explorer::ExplorerState;
-use crate::monitor::{record_alert, AppState, NodeState, Reference, Summary};
+use crate::monitor::{record_alert, AppState, NodeState, Reference, Settings, Summary};
 use crate::release::{LatestRelease, Release};
 use crate::wallet::{TxSummary, WalletState};
 
@@ -14,7 +14,15 @@ const TIP: u64 = 1_882_085;
 
 pub fn state(commit: &'static str) -> AppState {
     let now = Utc::now();
-    let mut s = AppState::new(commit);
+    let mut s = AppState::new(
+        commit,
+        Settings {
+            lag_threshold_blocks: 5,
+            node_poll_seconds: 30,
+            wallet_poll_seconds: 300,
+        },
+    );
+    s.live = false;
     s.generated_at = Some(now);
     s.reference = Reference {
         height: Some(TIP),
@@ -210,7 +218,7 @@ pub fn state(commit: &'static str) -> AppState {
         Embed::new("ok", "Recovered", "Mining Pool")
             .description("Back in sync at height **1882070** after being behind for 6m."),
     ] {
-        record_alert(&mut s, &e);
+        record_alert(&mut s, &e, crate::discord::delivery::SENT);
     }
     s
 }
