@@ -7,6 +7,7 @@ use chrono::{Duration, Utc};
 use crate::discord::Embed;
 use crate::explorer::ExplorerState;
 use crate::monitor::{record_alert, AppState, NodeState, Reference, Summary};
+use crate::release::LatestRelease;
 use crate::wallet::{TxSummary, WalletState};
 
 const TIP: u64 = 1_882_085;
@@ -30,6 +31,12 @@ pub fn state(commit: &'static str) -> AppState {
             .collect(),
     };
 
+    s.latest_release = Some(LatestRelease {
+        version: "6.0.7".into(),
+        url: "https://github.com/ergoplatform/ergo/releases/tag/v6.0.7".into(),
+        checked_at: now,
+    });
+
     let node =
         |id: &str, name: &str, host: &str, condition: &'static str, detail: &str| NodeState {
             id: id.into(),
@@ -50,7 +57,8 @@ pub fn state(commit: &'static str) -> AppState {
             indexed_lag: Some(0),
             sync_progress: None,
             peers: Some(30),
-            version: Some("6.1.5".into()),
+            version: Some("6.0.7".into()),
+            version_outdated: Some(false),
             is_mining: false,
             is_explorer: true,
             latency_ms: Some(3),
@@ -108,6 +116,8 @@ pub fn state(commit: &'static str) -> AppState {
     stuck.indexed_lag = None;
     stuck.is_explorer = false;
     stuck.peers = Some(3);
+    stuck.version = Some("6.0.3".into());
+    stuck.version_outdated = Some(true);
     stuck.runbook = Some("docs/runbooks/node-behind.md");
     stuck.status_since = Some(now - Duration::minutes(12));
     let mut duck = node(
@@ -124,7 +134,7 @@ pub fn state(commit: &'static str) -> AppState {
     duck.full_lag = None;
     duck.indexed_lag = None;
     duck.peers = None;
-    duck.version = None;
+    duck.version = Some("6.0.7".into());
     duck.latency_ms = None;
     duck.last_ok = Some(now - Duration::minutes(9));
     duck.last_error = duck.detail.clone().into();

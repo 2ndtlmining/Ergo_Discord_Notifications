@@ -13,6 +13,7 @@ use crate::config::Config;
 use crate::discord::{Discord, Embed};
 use crate::explorer::{self, ExplorerState};
 use crate::node::{self, Health};
+use crate::release::{self, LatestRelease};
 use crate::wallet::WalletState;
 
 /// Consecutive polls a new condition must be seen before alerting.
@@ -30,6 +31,8 @@ pub struct AppState {
     pub summary: Summary,
     pub nodes: Vec<NodeState>,
     pub wallets: Vec<WalletState>,
+    /// Newest Ergo node release on GitHub; null until the first check succeeds.
+    pub latest_release: Option<LatestRelease>,
     /// Served separately at /api/alerts.
     #[serde(skip)]
     pub alerts: VecDeque<AlertRecord>,
@@ -126,6 +129,8 @@ pub struct NodeState {
     pub sync_progress: Option<f64>,
     pub peers: Option<u32>,
     pub version: Option<String>,
+    /// True when `version` is older than `latest_release`; null if either is unknown.
+    pub version_outdated: Option<bool>,
     pub is_mining: bool,
     pub is_explorer: bool,
     pub latency_ms: Option<u64>,
@@ -144,6 +149,7 @@ impl AppState {
             summary: Summary::default(),
             nodes: Vec::new(),
             wallets: Vec::new(),
+            latest_release: None,
             alerts: VecDeque::new(),
         }
     }
@@ -239,6 +245,13 @@ async fn poll(config: &Config, client: &reqwest::Client, previous: &AppState) ->
         let info = ok.map(|p| &p.info);
         let full = info.and_then(|i| i.full_height);
         let indexed = ok.and_then(|p| p.indexed_height);
+        let version = info
+            .and_then(|i| i.app_version.clone())
+            .or(prev.and_then(|p| p.version.clone()));
+        let version_outdated = version
+            .as_deref()
+            .zip(previous.latest_release.as_ref())
+            .and_then(|(v, latest)| release::is_outdated(v, &latest.version));
         nodes.push(NodeState {
             id: cfg.id.clone(),
             name: cfg.name.clone(),
@@ -264,7 +277,8 @@ async fn poll(config: &Config, client: &reqwest::Client, previous: &AppState) ->
                 _ => None,
             },
             peers: info.and_then(|i| i.peers_count),
-            version: info.and_then(|i| i.app_version.clone()),
+            version,
+            version_outdated,
             is_mining: info.is_some_and(|i| i.is_mining),
             is_explorer: info.is_some_and(|i| i.is_explorer),
             latency_ms: ok.map(|p| p.latency_ms),

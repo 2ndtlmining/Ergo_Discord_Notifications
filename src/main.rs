@@ -5,6 +5,7 @@ mod explorer;
 mod monitor;
 mod node;
 mod preview;
+mod release;
 mod wallet;
 
 use std::net::SocketAddr;
@@ -85,6 +86,7 @@ async fn main() -> Result<()> {
             discord.clone(),
             shared.clone(),
         ));
+        tokio::spawn(release::run(client.clone(), shared.clone()));
         tokio::spawn(wallet::run(config.clone(), client, discord, shared.clone()));
         shared
     };
