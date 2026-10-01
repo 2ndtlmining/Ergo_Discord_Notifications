@@ -7,8 +7,9 @@ on its alerts. People should start with [README.md](README.md).
 
 `ergo-monitor` is a single Rust binary in one Docker container. It polls Ergo
 nodes and the public explorers, sends Discord alerts, and serves a dashboard
-plus a JSON API on port **7777**. All state is in memory; nothing is written
-to disk.
+plus a JSON API on port **7777**. All state is in memory. The only file it
+writes is `$STATE_DIR/last-startup-summary` inside the container, so a crash
+loop doesn't repeat the Discord startup summary more than once per 10 minutes.
 
 ## Acting on an alert
 

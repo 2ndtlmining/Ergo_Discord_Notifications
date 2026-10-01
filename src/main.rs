@@ -15,7 +15,7 @@ use std::time::Duration;
 use anyhow::Result;
 use axum::{
     extract::{Path, State},
-    http::{header, StatusCode},
+    http::{header, HeaderMap, StatusCode},
     response::IntoResponse,
     routing::get,
     Json, Router,
@@ -113,14 +113,17 @@ async fn main() -> Result<()> {
     };
 
     let app = Router::new()
-        .route("/", get(|| asset("text/html; charset=utf-8", INDEX_HTML)))
+        .route(
+            "/",
+            get(|h: HeaderMap| asset(h, "text/html; charset=utf-8", INDEX_HTML)),
+        )
         .route(
             "/app.css",
-            get(|| asset("text/css; charset=utf-8", APP_CSS)),
+            get(|h: HeaderMap| asset(h, "text/css; charset=utf-8", APP_CSS)),
         )
         .route(
             "/app.js",
-            get(|| asset("text/javascript; charset=utf-8", APP_JS)),
+            get(|h: HeaderMap| asset(h, "text/javascript; charset=utf-8", APP_JS)),
         )
         .route("/healthz", get(healthz))
         .route("/api/status", get(status))
@@ -150,18 +153,56 @@ const INDEX_HTML: &str = include_str!("../web/index.html");
 const APP_CSS: &str = include_str!("../web/app.css");
 const APP_JS: &str = include_str!("../web/app.js");
 
-async fn asset(content_type: &'static str, body: &'static str) -> impl IntoResponse {
+/// The dashboard files never change while the binary runs, so the browser
+/// can revalidate with an ETag and get a body-less 304 (#36).
+async fn asset(
+    headers: HeaderMap,
+    content_type: &'static str,
+    body: &'static str,
+) -> impl IntoResponse {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    body.hash(&mut hasher);
+    let etag = format!("\"{:016x}\"", hasher.finish());
+    let fresh = headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v == etag);
+    let status = if fresh {
+        StatusCode::NOT_MODIFIED
+    } else {
+        StatusCode::OK
+    };
     (
+        status,
         [
-            (header::CONTENT_TYPE, content_type),
-            (header::CACHE_CONTROL, "no-cache"),
+            (header::CONTENT_TYPE, content_type.to_string()),
+            (header::CACHE_CONTROL, "no-cache".to_string()),
+            (header::ETAG, etag),
         ],
-        body,
+        if fresh { "" } else { body },
     )
 }
 
-async fn status(State(shared): State<Shared>) -> Json<AppState> {
-    Json(shared.read().await.clone())
+/// Serialised straight from the shared state under the read lock, without
+/// cloning it first (#36).
+fn json_bytes(value: &impl serde::Serialize) -> impl IntoResponse {
+    match serde_json::to_vec(value) {
+        Ok(body) => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "application/json")],
+            body,
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            [(header::CONTENT_TYPE, "text/plain")],
+            e.to_string().into_bytes(),
+        ),
+    }
+}
+
+async fn status(State(shared): State<Shared>) -> impl IntoResponse {
+    json_bytes(&*shared.read().await)
 }
 
 async fn node(
@@ -184,8 +225,8 @@ async fn node(
         })
 }
 
-async fn alerts(State(shared): State<Shared>) -> Json<Vec<monitor::AlertRecord>> {
-    Json(shared.read().await.alerts.iter().cloned().collect())
+async fn alerts(State(shared): State<Shared>) -> impl IntoResponse {
+    json_bytes(&shared.read().await.alerts)
 }
 
 /// 503 when the node poll loop has stopped producing fresh data, so the

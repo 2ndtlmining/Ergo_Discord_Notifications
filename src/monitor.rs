@@ -22,6 +22,40 @@ const EXPLORERS_KEY: &str = "__explorers";
 /// Runbook paths in alerts link here, so they open from a phone (#34).
 const REPO_BLOB_URL: &str = "https://github.com/2ndtlmining/Ergo_Discord_Notifications/blob/main";
 
+/// After a crash Docker restarts the same container, so a file in it survives
+/// restarts but not a redeploy (which recreates the container). A startup
+/// summary is skipped if the last one was this recent, so a crash loop
+/// doesn't flood the channel (#27).
+const SUMMARY_MIN_GAP_MINUTES: i64 = 10;
+
+/// Whether to post the startup summary, recording the time when it does.
+/// `STATE_DIR` unset (local runs, tests) means always post.
+fn should_post_summary(dir: Option<&std::path::Path>, now: DateTime<Utc>) -> bool {
+    let Some(dir) = dir else { return true };
+    let file = dir.join("last-startup-summary");
+    let last = std::fs::read_to_string(&file)
+        .ok()
+        .and_then(|s| s.trim().parse::<DateTime<Utc>>().ok());
+    if let Some(last) = last {
+        if now - last < Duration::minutes(SUMMARY_MIN_GAP_MINUTES) {
+            tracing::warn!(
+                "restarted within {SUMMARY_MIN_GAP_MINUTES} minutes of the last startup summary \
+                 (last at {last}); not posting another. Check the logs above for why it restarted."
+            );
+            return false;
+        }
+    }
+    if let Err(e) =
+        std::fs::create_dir_all(dir).and_then(|_| std::fs::write(&file, now.to_rfc3339()))
+    {
+        tracing::warn!(
+            "could not record the startup summary time in {}: {e}",
+            file.display()
+        );
+    }
+    true
+}
+
 fn runbook_link(path: &str) -> String {
     format!("[{path}]({REPO_BLOB_URL}/{path})")
 }
@@ -124,6 +158,28 @@ fn plain_text(md: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn startup_summary_is_rate_limited() {
+        use chrono::{Duration, Utc};
+        let dir = std::env::temp_dir().join(format!("ergo-monitor-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let t0 = Utc::now();
+        assert!(super::should_post_summary(Some(&dir), t0));
+        // A crash-loop restart a minute later: skipped.
+        assert!(!super::should_post_summary(
+            Some(&dir),
+            t0 + Duration::minutes(1)
+        ));
+        // Long after: posted again.
+        assert!(super::should_post_summary(
+            Some(&dir),
+            t0 + Duration::minutes(11)
+        ));
+        // No state dir: always post.
+        assert!(super::should_post_summary(None, t0));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn freshness_follows_the_poll_interval() {
         use super::{AppState, Settings};
@@ -247,16 +303,19 @@ pub async fn run(
     let mut interval = tokio::time::interval(StdDuration::from_secs(config.node_poll_seconds));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut first = true;
+    let mut last = Poll::default();
 
     loop {
         interval.tick().await;
-        let previous = shared.read().await.clone();
-        let mut state = poll(&config, &client, &previous).await;
+        // Only the release info comes from the shared state; the previous poll
+        // is kept here, so the whole state (alerts, wallets) isn't cloned (#36).
+        let latest = shared.read().await.latest_release.clone();
+        let mut state = poll(&config, &client, &last, latest.as_ref()).await;
         let alerts = evaluate(&config, &mut state, &mut trackers, Utc::now());
         let queued = {
             // Only touch the fields this loop owns; the wallet loop writes `wallets`.
             let mut s = shared.write().await;
-            s.generated_at = state.generated_at;
+            s.generated_at = Some(state.generated_at);
             s.reference = state.reference.clone();
             s.summary = state.summary.clone();
             s.nodes = state.nodes.clone();
@@ -276,13 +335,31 @@ pub async fn run(
             for n in &state.nodes {
                 tracing::info!("first check: node [{}] {}: {}", n.id, n.condition, n.detail);
             }
-            discord.send(vec![startup_summary(&state)], vec![], false);
+            let dir = std::env::var_os("STATE_DIR").map(std::path::PathBuf::from);
+            if should_post_summary(dir.as_deref(), Utc::now()) {
+                discord.send(vec![startup_summary(&state)], vec![], false);
+            }
         }
         discord.send_alerts(queued);
+        last = state;
     }
 }
 
-async fn poll(config: &Config, client: &reqwest::Client, previous: &AppState) -> AppState {
+/// What one poll produces: the parts of `AppState` the node loop owns.
+#[derive(Default)]
+struct Poll {
+    generated_at: DateTime<Utc>,
+    reference: Reference,
+    summary: Summary,
+    nodes: Vec<NodeState>,
+}
+
+async fn poll(
+    config: &Config,
+    client: &reqwest::Client,
+    previous: &Poll,
+    latest_release: Option<&LatestRelease>,
+) -> Poll {
     let now = Utc::now();
     let explorers = [
         ("mainnet", config.explorer_mainnet_api.clone()),
@@ -351,7 +428,7 @@ async fn poll(config: &Config, client: &reqwest::Client, previous: &AppState) ->
             .or(prev.and_then(|p| p.version.clone()));
         let target = version
             .as_deref()
-            .zip(previous.latest_release.as_ref())
+            .zip(latest_release)
             .map(|(v, latest)| release::target_for(v, latest));
         let version_outdated = version
             .as_deref()
@@ -411,22 +488,21 @@ async fn poll(config: &Config, client: &reqwest::Client, previous: &AppState) ->
         syncing: count("syncing"),
         unknown: count("unknown"),
     };
-    AppState {
-        generated_at: Some(now),
+    Poll {
+        generated_at: now,
         reference: Reference {
             height: reference,
             sources,
         },
         summary,
         nodes,
-        ..previous.clone()
     }
 }
 
 /// Feeds every subject's condition to its tracker and returns the alerts to send.
 fn evaluate(
     config: &Config,
-    state: &mut AppState,
+    state: &mut Poll,
     trackers: &mut HashMap<String, Tracker>,
     now: DateTime<Utc>,
 ) -> Vec<(Embed, bool)> {
@@ -527,7 +603,7 @@ fn problem_embed(n: &NodeState, author: &str, tip: Option<u64>) -> Embed {
     e
 }
 
-fn startup_summary(state: &AppState) -> Embed {
+fn startup_summary(state: &Poll) -> Embed {
     let s = &state.summary;
     // The worst condition sets the icon, so a down node shows red, not yellow.
     let icon = ["down", "behind", "indexer-behind", "syncing", "unknown"]

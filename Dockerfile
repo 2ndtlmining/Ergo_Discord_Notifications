@@ -84,6 +84,8 @@ USER ergo
 WORKDIR /home/ergo
 
 ENV HTTP_PORT=7777
+# Holds only the time of the last startup summary (see monitor.rs).
+ENV STATE_DIR=/home/ergo/state
 EXPOSE 7777
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
