@@ -108,6 +108,7 @@ function render() {
   if (!status) return;
   renderLive();
   renderHealth();
+  renderDiscord();
   renderTip();
   renderRail();
   renderNodes();
@@ -143,6 +144,17 @@ function renderHealth() {
   const color = { ok: "#30a46c", warn: "#f5a524", bad: "#e5484d" }[state] || "#8b8d98";
   $("favicon").href = "data:image/svg+xml," + encodeURIComponent(
     `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><circle cx="12" cy="12" r="11" fill="${color}"/><g fill="none" stroke="white" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" transform="translate(6 6) scale(.5)">${ICON[icon]}</g></svg>`);
+}
+
+// Shown only while Discord delivery is failing (#29).
+function renderDiscord() {
+  const d = status.discord;
+  const el = $("discord");
+  const failing = !!(d && d.enabled && d.last_error);
+  el.hidden = !failing;
+  if (!failing) return;
+  el.innerHTML = `${svg("down")}Discord alerts failing`;
+  el.title = `${d.last_error} (${ago(d.last_error_at)})${d.queued ? `. ${d.queued} waiting to send.` : ""}`;
 }
 
 function renderTip() {
@@ -318,7 +330,7 @@ function renderAlerts() {
   }
   list.innerHTML = alerts.slice(0, 20).map((a) => `
     <li data-c="${esc(a.kind)}">${svg(a.kind)}
-      <div><div class="t"><b>${esc(a.subject)}</b> <span>${esc(a.headline)}</span></div><div class="d">${esc(a.detail)}</div></div>
+      <div><div class="t"><b>${esc(a.subject)}</b> <span>${esc(a.headline)}</span>${a.delivery === "failed" ? ' <em class="undelivered">not delivered to Discord</em>' : ""}</div><div class="d">${esc(a.detail)}</div></div>
       <time datetime="${esc(a.at)}">${ago(a.at)}</time></li>`).join("");
 }
 

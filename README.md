@@ -88,6 +88,8 @@ After editing `.env`, run the deploy script again (see
 |---|---|---|
 | `DISCORD_WEBHOOK_URL` | *(none)* | Discord channel webhook. Without it, alerts only go to the logs |
 | `DISCORD_USER` | *(none)* | User ID to @mention on problems (not on recoveries) |
+| `WALLET_MENTION` | `false` | Also @mention on incoming wallet transactions |
+| `DASHBOARD_URL` | *(none)* | Dashboard address as you open it (`http://<host-ip>:7777`); Discord alert titles link to it |
 | `DISCORD_ICON_BASE_URL` | GitHub `main`/`assets/discord` | Where Discord loads the status icons from; must be public |
 | `NODE_<n>_NAME` / `NODE_<n>_URL` | | A node's display name and REST API address (`http://ip:9053`) |
 | `NODE_<n>_WALLET_ADDRESS` | *(none)* | Wallet run by that node; watched through the public explorer |
@@ -165,6 +167,27 @@ permission (for example after copying the folder); fix it once with
 `chmod +x scripts/deploy.sh`. Don't run `deploy.ps1` on Linux: it's a
 Windows PowerShell script.
 
+## Checking Discord alerts work
+
+Send a test alert without waiting for a real problem:
+
+```sh
+docker compose exec ergo-monitor ergo-monitor test-alert
+```
+
+It prints `Test alert sent` or the reason it failed (for example a deleted
+webhook). If Discord stops accepting alerts later, the dashboard header shows
+**Discord alerts failing**, and alerts that never arrived are marked
+"not delivered to Discord". Undelivered alerts are retried for up to an hour.
+
+At startup the logs also warn about likely `.env` mistakes, such as a
+misspelt setting (`NODE_1_WALLET` instead of `NODE_1_WALLET_ADDRESS`), an
+address that isn't an Ergo address, or the example webhook URL:
+
+```sh
+docker compose logs | grep -i "config:"
+```
+
 ## How alerts behave
 
 | Alert | When |
@@ -173,7 +196,7 @@ Windows PowerShell script.
 | Still … | Every 30 minutes while it lasts (every 24h for syncing) |
 | Recovered | When the node is healthy again, with how long the problem lasted |
 | Explorers unreachable | Both explorers are down; lag alerts pause until one is back |
-| Received | A new incoming transaction to a watched wallet |
+| Received | A new incoming transaction to a watched wallet (no @mention unless `WALLET_MENTION=true`) |
 
 On startup the monitor posts one summary and records the current state
 silently, so restarts never re-announce old problems or transactions. Every

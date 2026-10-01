@@ -70,6 +70,10 @@ Node fields (`/api/status` `.nodes[]`):
 | `runbook` | Path of the runbook for the current condition, or null |
 
 `settings` holds `lag_threshold_blocks`, `node_poll_seconds` and `wallet_poll_seconds`.
+`discord` holds `enabled`, `last_sent`, `last_error` (set while delivery is
+failing), `last_error_at` and `queued`. `ergo-monitor test-alert` (run with
+`docker compose exec ergo-monitor ergo-monitor test-alert`) posts one sample
+alert and exits non-zero if Discord rejects it.
 
 `reference.height` is the highest height reported by the reachable explorers;
 null means both are unreachable, and then lag can't be judged (`unknown`).
