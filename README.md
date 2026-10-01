@@ -20,16 +20,27 @@ sends Discord alerts when something needs attention.
 
 ## Quick start
 
+**Linux / macOS** (recommended for 24/7 monitoring):
+
+```sh
+git clone https://github.com/2ndtlmining/Ergo_Discord_Notifications.git
+cd Ergo_Discord_Notifications
+cp .env.example .env          # then edit .env (see below)
+scripts/deploy.sh
+```
+
+**Windows** (Docker Desktop, PowerShell):
+
 ```powershell
 git clone https://github.com/2ndtlmining/Ergo_Discord_Notifications.git
 cd Ergo_Discord_Notifications
 copy .env.example .env        # then edit .env (see below)
-scripts/deploy.ps1            # or: docker compose up -d --build
+scripts/deploy.ps1
 ```
 
-Open **http://localhost:7777**. Discord receives a startup summary within 30 seconds.
-
-On Linux/macOS, use `cp .env.example .env` and `scripts/deploy.sh`.
+Open **http://localhost:7777** (or `http://<host-ip>:7777` from another
+machine). Discord receives a startup summary within 30 seconds. To update
+later or apply `.env` changes, see [Updating](#updating-and-changing-settings).
 
 ## Where your node IPs and wallets go: `.env`
 
@@ -67,12 +78,9 @@ WALLET_1_NAME=Mining
 WALLET_1_ADDRESS=9h...
 ```
 
-After editing `.env`, run `scripts/deploy.ps1` (Windows) or `scripts/deploy.sh`
-(Linux/macOS) again. A plain `docker restart` does **not** re-read `.env`.
-
-To update to the latest code on Linux, run `scripts/deploy.sh --pull`: it does
-a `git pull`, rebuilds, and restarts. It uses `sudo` for Docker only if your
-user can't reach Docker without it. On Windows, `git pull` then `scripts/deploy.ps1`.
+After editing `.env`, run the deploy script again (see
+[Updating](#updating-and-changing-settings)). A plain `docker restart` does
+**not** re-read `.env`.
 
 ### All settings
 
@@ -120,6 +128,36 @@ docker compose logs -f          # follow the logs
 docker compose ps               # status and health
 docker compose down             # stop it (stays stopped after reboot)
 ```
+
+## Updating and changing settings
+
+Run these in the project folder on the machine that runs the monitor.
+
+| You want to | Linux / macOS | Windows |
+|---|---|---|
+| Get the latest code from GitHub | `scripts/deploy.sh --pull` | `git pull` then `scripts/deploy.ps1` |
+| Apply changes you made to `.env` | `scripts/deploy.sh` | `scripts/deploy.ps1` |
+
+Both scripts rebuild the image and recreate the container, so new code and
+`.env` changes always take effect. Your `.env` is never touched. The first
+build after an update compiles the code and can take a few minutes; later
+ones are faster. `deploy.sh` uses `sudo` for Docker only when your user
+can't reach Docker without it.
+
+Check that the update worked:
+
+```sh
+curl -s localhost:7777/healthz        # "commit" should match: git log --oneline -1
+docker compose ps                     # STATUS shows "healthy" after ~30 seconds
+docker compose logs --tail 30         # startup lines, nodes, latest Ergo release
+```
+
+The running commit is also shown in the dashboard footer.
+
+If `scripts/deploy.sh` says **Permission denied**, the file lost its run
+permission (for example after copying the folder); fix it once with
+`chmod +x scripts/deploy.sh`. Don't run `deploy.ps1` on Linux: it's a
+Windows PowerShell script.
 
 ## How alerts behave
 
