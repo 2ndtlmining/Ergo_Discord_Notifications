@@ -64,15 +64,18 @@ Node fields (`/api/status` `.nodes[]`):
 | `full_lag`, `indexed_lag` | Blocks behind `reference.height` |
 | `sync_progress` | 0–1 while syncing |
 | `peers`, `version`, `latency_ms`, `is_mining`, `is_explorer` | From `/info` (`version` is the last known one while down) |
-| `version_outdated` | `true` if `version` is older than `latest_release.version`; null if either is unknown |
+| `latest_version`, `latest_version_url` | Newest release of the node's own `major.minor` line (6.0.x, 6.1.x), else the stable release |
+| `version_outdated` | `true` if `version` is older than `latest_version`; null if either is unknown |
 | `last_ok`, `last_error` | Last successful response; last failure text |
 | `runbook` | Path of the runbook for the current condition, or null |
 
 `reference.height` is the highest height reported by the reachable explorers;
 null means both are unreachable, and then lag can't be judged (`unknown`).
 
-`latest_release` (`version`, `url`, `checked_at`) is the newest Ergo node release
-on GitHub, checked every 6 hours; null until the first check succeeds.
+`latest_release` (`version`, `url`, `lines`, `checked_at`) is the newest stable Ergo
+node release on GitHub plus the newest release of each line in `lines` (Ergo
+marks the newer line pre-release). Checked every 6 hours; null until the first
+check succeeds.
 
 ## How the condition is decided (`src/node.rs`)
 
