@@ -9,6 +9,8 @@ sends Discord alerts when something needs attention.
   from the mainnet and P2P explorers. Alerts when a node is **down**, more than
   5 blocks **behind**, its **indexer is behind**, or it's **syncing**, and again
   when it **recovers**.
+- **Versions**: each node's version, flagged when a newer Ergo node release
+  is out on GitHub. Click a node's address to open its `/panel`.
 - **Wallets**: balance and incoming transactions for bot/pool wallets and any
   other address.
 - **Dashboard** at `http://<host>:7777`, plus a JSON API for scripts and AI

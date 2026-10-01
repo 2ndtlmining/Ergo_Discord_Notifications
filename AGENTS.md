@@ -41,7 +41,7 @@ All responses are JSON. The API is stable within `schema_version` 1.
 
 | Endpoint | Returns |
 |---|---|
-| `GET /api/status` | Everything: reference height, summary, nodes, wallets |
+| `GET /api/status` | Everything: reference height, summary, nodes, wallets, latest node release |
 | `GET /api/nodes/{id}` | One node (404 lists the known ids) |
 | `GET /api/alerts` | Last 100 alerts sent, newest first |
 | `GET /healthz` | `{"status":"ok","commit":…}` |
@@ -63,12 +63,16 @@ Node fields (`/api/status` `.nodes[]`):
 | `full_height`, `headers_height`, `indexed_height` | From the node; `indexed_height` is null without `extraIndex` |
 | `full_lag`, `indexed_lag` | Blocks behind `reference.height` |
 | `sync_progress` | 0–1 while syncing |
-| `peers`, `version`, `latency_ms`, `is_mining`, `is_explorer` | From `/info` |
+| `peers`, `version`, `latency_ms`, `is_mining`, `is_explorer` | From `/info` (`version` is the last known one while down) |
+| `version_outdated` | `true` if `version` is older than `latest_release.version`; null if either is unknown |
 | `last_ok`, `last_error` | Last successful response; last failure text |
 | `runbook` | Path of the runbook for the current condition, or null |
 
 `reference.height` is the highest height reported by the reachable explorers;
 null means both are unreachable, and then lag can't be judged (`unknown`).
+
+`latest_release` (`version`, `url`, `checked_at`) is the newest Ergo node release
+on GitHub, checked every 6 hours; null until the first check succeeds.
 
 ## How the condition is decided (`src/node.rs`)
 
@@ -91,6 +95,7 @@ null means both are unreachable, and then lag can't be judged (`unknown`).
 | `src/node.rs` | Node probing and condition classification |
 | `src/alerts.rs` | Debounce / reminder / recovery state machine |
 | `src/monitor.rs` | Polling loop, shared `AppState`, alert text |
+| `src/release.rs` | Latest Ergo node release from GitHub, version comparison |
 | `src/wallet.rs` | Wallet balances and incoming-transaction alerts |
 | `src/discord.rs` | Webhook embeds, icons, rate limits |
 | `src/preview.rs` | Fake data for `ergo-monitor preview` |

@@ -222,6 +222,15 @@ function heightCell(value, lag, cls, label, n) {
     <span class="lag ${bad ? "bad" : ""}">${lagText}</span></div>`;
 }
 
+function versionText(n, latest) {
+  if (!n.version) return "n/a";
+  if (!latest) return esc(n.version);
+  if (n.version_outdated) {
+    return `${esc(n.version)} <a class="outdated" href="${esc(latest.url)}" target="_blank" rel="noopener">${esc(latest.version)} available</a>`;
+  }
+  return `${esc(n.version)} <span class="latest">latest</span>`;
+}
+
 function renderNodes() {
   const q = query.trim().toLowerCase();
   const problems = status.nodes.filter((n) => n.condition !== "ok").length;
@@ -236,14 +245,16 @@ function renderNodes() {
   const wallets = new Map(status.wallets.filter((w) => w.node_id).map((w) => [w.node_id, w]));
   $("node-rows").innerHTML = rows.map((n) => {
     const open = expanded.has(n.id);
-    const roles = [n.is_mining && '<span class="role mining">Mining</span>', n.is_explorer && '<span class="role">Indexer</span>']
+    const latest = status.latest_release;
+    const roles = [n.is_mining && '<span class="role mining">Mining</span>', n.is_explorer && '<span class="role">Indexer</span>',
+      n.version_outdated && `<span class="role update" title="Running ${esc(n.version)}, latest is ${esc(latest?.version)}">Update available</span>`]
       .filter(Boolean).join("");
     const w = wallets.get(n.id);
     const syncing = n.condition === "syncing"
       ? `<div class="progress" aria-hidden="true"><i style="width:${(n.sync_progress * 100).toFixed(1)}%"></i></div>` : "";
     return `<div class="row" role="rowgroup" data-c="${n.condition}" ${n.condition !== "ok" ? "data-problem" : ""} aria-expanded="${open}" data-id="${esc(n.id)}">
       <div class="row-main" role="row" tabindex="0" aria-label="${esc(n.name)}: ${esc(LABEL[n.condition])}. Show details">
-        <div class="name" role="cell"><strong>${esc(n.name)}</strong><small>${esc(hostOf(n.url))}</small><span class="roles">${roles}</span></div>
+        <div class="name" role="cell"><strong>${esc(n.name)}</strong><a class="panel" href="${esc(n.url)}/panel" target="_blank" rel="noopener" title="Open the node panel">${esc(hostOf(n.url))}</a><span class="roles">${roles}</span></div>
         <div class="status" role="cell" title="${esc(n.detail)}">${svg(n.condition)}<span>${esc(LABEL[n.condition])}</span></div>
         <div role="cell" class="c-full">${heightCell(n.full_height, n.full_lag, "full", "Height", n)}${syncing}</div>
         <div role="cell" class="c-idx">${n.indexed_height == null && n.status !== "down"
@@ -261,11 +272,12 @@ function renderNodes() {
           ${spark(n.id)}
         </div>
         <dl class="kv">
+          <dt>Panel</dt><dd><a href="${esc(n.url)}/panel" target="_blank" rel="noopener">${esc(hostOf(n.url))}/panel</a></dd>
           <dt>Endpoint</dt><dd><button type="button" class="copy" data-copy="${esc(n.url)}">${esc(n.url)}${svg("copy")}</button></dd>
           <dt>In this state</dt><dd>${since(n.status_since)}</dd>
           <dt>Last response</dt><dd>${ago(n.last_ok)}</dd>
           <dt>Headers</dt><dd>${fmt(n.headers_height)}</dd>
-          <dt>Version</dt><dd>${esc(n.version || "n/a")}</dd>
+          <dt>Version</dt><dd>${versionText(n, latest)}</dd>
           ${w ? `<dt>Wallet</dt><dd>${erg(w.balance_erg)} ERG · ${esc(shortAddr(w.address))}</dd>` : ""}
         </dl>
       </div>
@@ -326,13 +338,36 @@ function toast(text) {
   toast.timer = setTimeout(() => t.removeAttribute("data-show"), 1600);
 }
 
+// navigator.clipboard only exists on HTTPS and localhost; the dashboard is
+// usually opened over plain HTTP on the LAN, so fall back to execCommand.
+async function copyText(text) {
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch { /* fall through */ }
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.setAttribute("readonly", "");
+  ta.style.cssText = "position:fixed;top:0;left:0;opacity:0";
+  document.body.appendChild(ta);
+  ta.select();
+  let ok = false;
+  try { ok = document.execCommand("copy"); } catch { ok = false; }
+  ta.remove();
+  return ok;
+}
+
 document.addEventListener("click", (e) => {
   const copy = e.target.closest("[data-copy]");
   if (copy) {
     e.stopPropagation();
-    navigator.clipboard?.writeText(copy.dataset.copy).then(() => toast("Endpoint copied"), () => toast("Copy not available here"));
+    copyText(copy.dataset.copy).then((ok) => toast(ok ? "Endpoint copied" : "Copy not available here"));
     return;
   }
+  // Links inside a row (the panel) open normally instead of toggling it.
+  if (e.target.closest("a")) return;
   const main = e.target.closest(".row-main");
   if (main) return toggleRow(main.parentElement);
   const marker = e.target.closest(".marker");
@@ -352,7 +387,7 @@ document.addEventListener("click", (e) => {
 });
 document.addEventListener("keydown", (e) => {
   const main = e.target.closest?.(".row-main");
-  if (main && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); toggleRow(main.parentElement); }
+  if (main && e.target === main && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); toggleRow(main.parentElement); }
 });
 $("search").addEventListener("input", (e) => { query = e.target.value; if (status) renderNodes(); });
 
