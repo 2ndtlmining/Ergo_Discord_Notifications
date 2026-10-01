@@ -136,11 +136,20 @@ impl WalletState {
     }
 }
 
+/// Transactions per explorer request, and how many pages one check may read
+/// to catch up on a busy wallet (#26).
+const PAGE: u64 = 50;
+const MAX_PAGES: u64 = 6;
+
+/// Balance plus every transaction newer than `seen` (newest first), paging
+/// back as needed. The bool is true when there were more new transactions
+/// than one check reads, so some older ones were skipped.
 async fn fetch(
     client: &reqwest::Client,
     base: &str,
     address: &str,
-) -> Result<(u64, TxPage), String> {
+    seen: Option<u64>,
+) -> Result<(u64, TxPage, bool), String> {
     let get = |path: String| async move {
         client
             .get(format!("{base}/api/v1/addresses/{address}/{path}"))
@@ -149,13 +158,54 @@ async fn fetch(
             .and_then(|r| r.error_for_status())
             .map_err(|e| e.to_string())
     };
-    let (balance, page) = tokio::try_join!(
-        get("balance/confirmed".into()),
-        get("transactions?limit=25".into())
-    )?;
+    let page_at = |offset: u64| get(format!("transactions?limit={PAGE}&offset={offset}"));
+    let (balance, first) = tokio::try_join!(get("balance/confirmed".into()), page_at(0))?;
     let balance: Balance = balance.json().await.map_err(|e| e.to_string())?;
-    let page: TxPage = page.json().await.map_err(|e| e.to_string())?;
-    Ok((balance.nano_ergs, page))
+    let mut page: TxPage = first.json().await.map_err(|e| e.to_string())?;
+
+    let mut truncated = false;
+    if let Some(after) = seen {
+        let mut offset = PAGE;
+        while offset < page.total
+            && page
+                .items
+                .last()
+                .is_some_and(|t| t.inclusion_height > after)
+        {
+            if offset >= PAGE * MAX_PAGES {
+                truncated = true;
+                break;
+            }
+            let more: TxPage = page_at(offset)
+                .await?
+                .json()
+                .await
+                .map_err(|e| e.to_string())?;
+            if more.items.is_empty() {
+                break;
+            }
+            page.items.extend(more.items);
+            offset += PAGE;
+        }
+    }
+    Ok((balance.nano_ergs, page, truncated))
+}
+
+/// The mainnet explorer first, then the P2P explorer if that fails (#26).
+async fn fetch_any(
+    client: &reqwest::Client,
+    bases: &[String],
+    address: &str,
+    seen: Option<u64>,
+) -> Result<(u64, TxPage, bool), String> {
+    let mut errors = Vec::new();
+    for base in bases {
+        match fetch(client, base, address, seen).await {
+            Ok(r) => return Ok(r),
+            Err(e) => errors.push(format!("{base}: {e}")),
+        }
+    }
+    Err(errors.join("; "))
 }
 
 pub async fn run(
@@ -178,15 +228,16 @@ pub async fn run(
 
     loop {
         interval.tick().await;
+        let mut bases = vec![config.explorer_mainnet_api.clone()];
+        if config.explorer_p2p_api != config.explorer_mainnet_api {
+            bases.push(config.explorer_p2p_api.clone());
+        }
         let tasks: Vec<_> = wallets
             .iter()
             .map(|w| {
-                let (c, base, addr) = (
-                    client.clone(),
-                    config.explorer_mainnet_api.clone(),
-                    w.address.clone(),
-                );
-                tokio::spawn(async move { fetch(&c, &base, &addr).await })
+                let (c, bases, addr) = (client.clone(), bases.clone(), w.address.clone());
+                let after = seen.get(&w.id).copied();
+                tokio::spawn(async move { fetch_any(&c, &bases, &addr, after).await })
             })
             .collect();
 
@@ -198,7 +249,15 @@ pub async fn run(
                     tracing::warn!("wallet {}: {e}", w.name);
                     w.last_error = Some(e);
                 }
-                Ok((nano, page)) => {
+                Ok((nano, page, truncated)) => {
+                    if truncated {
+                        tracing::warn!(
+                            "wallet {}: more than {} transactions since the last check; \
+                             only the newest are announced",
+                            w.name,
+                            PAGE * MAX_PAGES
+                        );
+                    }
                     let top = page
                         .items
                         .iter()
@@ -231,7 +290,8 @@ pub async fn run(
                 .into_iter()
                 .map(|embed| {
                     let id = record_alert(&mut state, &embed, discord.initial_delivery());
-                    (embed, true, id)
+                    // Payouts are routine; only @mention for them if asked to (#34).
+                    (embed, config.wallet_mention, id)
                 })
                 .collect()
         };
@@ -256,8 +316,8 @@ fn received_embed(w: &WalletState, tx: &TxSummary, balance_nano: u64, total: u64
         &format!("{:.4} ERG", balance_nano as f64 / NANO),
         true,
     )
-    .field("Transactions", &total.to_string(), true)
-    .field("Block", &tx.height.to_string(), true)
+    .field("Transactions", &crate::discord::thousands(total), true)
+    .field("Block", &crate::discord::thousands(tx.height), true)
     .field(
         "Time",
         &tx.timestamp.format("%Y-%m-%d %H:%M UTC").to_string(),
@@ -338,6 +398,68 @@ mod tests {
         assert_eq!(page.total, 780);
         assert_eq!(page.items[0].inclusion_height, 1_881_485);
         assert_eq!(page.items[0].net_nano(ME), 5);
+    }
+
+    /// A fake explorer holding `total` transactions at heights total..1
+    /// (newest first). Returns its base URL.
+    async fn fake_explorer(total: u64) -> String {
+        use axum::{extract::Query, routing::get, Json, Router};
+        use std::collections::HashMap;
+        let app = Router::new()
+            .route(
+                "/api/v1/addresses/{addr}/balance/confirmed",
+                get(|| async { Json(serde_json::json!({ "nanoErgs": 5_000_000_000u64 })) }),
+            )
+            .route(
+                "/api/v1/addresses/{addr}/transactions",
+                get(move |Query(q): Query<HashMap<String, u64>>| async move {
+                    let (limit, offset) = (q["limit"], q["offset"]);
+                    let items: Vec<_> = (0..limit)
+                        .map(|i| total.saturating_sub(offset + i))
+                        .filter(|h| *h > 0)
+                        .map(|h| {
+                            serde_json::json!({
+                                "id": format!("tx{h}"), "timestamp": 1_790_416_460_444u64,
+                                "inclusionHeight": h, "inputs": [],
+                                "outputs": [{ "address": ME, "value": 1 }],
+                            })
+                        })
+                        .collect();
+                    Json(serde_json::json!({ "items": items, "total": total }))
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        base
+    }
+
+    #[tokio::test]
+    async fn pages_back_to_the_last_seen_transaction() {
+        let base = fake_explorer(500).await;
+        let client = reqwest::Client::new();
+        // 120 new transactions since height 380: three pages of 50.
+        let (nano, page, truncated) = fetch(&client, &base, ME, Some(380)).await.unwrap();
+        assert_eq!(nano, 5_000_000_000);
+        assert!(!truncated);
+        assert_eq!(incoming_since(&page, ME, 380).len(), 120);
+        // Far behind: stops after MAX_PAGES and says so.
+        let (_, page, truncated) = fetch(&client, &base, ME, Some(1)).await.unwrap();
+        assert!(truncated);
+        assert_eq!(page.items.len() as u64, PAGE * MAX_PAGES);
+        // First check (nothing seen yet): one page only.
+        let (_, page, _) = fetch(&client, &base, ME, None).await.unwrap();
+        assert_eq!(page.items.len() as u64, PAGE);
+    }
+
+    #[tokio::test]
+    async fn falls_back_to_the_second_explorer() {
+        let good = fake_explorer(10).await;
+        let bases = ["http://127.0.0.1:1".to_string(), good];
+        let (_, page, _) = fetch_any(&reqwest::Client::new(), &bases, ME, None)
+            .await
+            .unwrap();
+        assert_eq!(page.items.len(), 10);
     }
 
     #[test]

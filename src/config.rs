@@ -25,8 +25,15 @@ pub struct Config {
     pub wallet_min_alert_erg: f64,
     pub alert_cooldown_minutes: u64,
     pub http_port: u16,
+    /// @mention on incoming wallet transactions too, not only on problems.
+    pub wallet_mention: bool,
+    /// Public address of the dashboard; Discord alert titles link to it.
+    pub dashboard_url: Option<String>,
     pub nodes: Vec<NodeConfig>,
     pub wallets: Vec<WalletConfig>,
+    /// Likely mistakes that don't stop the monitor; logged at startup (#30).
+    #[serde(skip)]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -76,9 +83,13 @@ impl Config {
             wallet_min_alert_erg: number(&vars, "WALLET_MIN_ALERT_ERG", 0.0)?,
             alert_cooldown_minutes: number(&vars, "ALERT_COOLDOWN_MINUTES", 30)?,
             http_port: number(&vars, "HTTP_PORT", 7777)?,
+            wallet_mention: flag(&vars, "WALLET_MENTION")?,
+            dashboard_url: get("DASHBOARD_URL").map(base_url),
             nodes: nodes(&vars)?,
             wallets: wallets(&vars)?,
+            warnings: unknown_keys(&vars),
         };
+        let mut config = config;
 
         if config.node_poll_seconds == 0 || config.wallet_poll_seconds == 0 {
             bail!("NODE_POLL_SECONDS and WALLET_POLL_SECONDS must be greater than 0");
@@ -109,6 +120,36 @@ impl Config {
                 bail!("two wallets share the name/id '{id}'; wallet names must be unique");
             }
         }
+
+        let addresses = config
+            .nodes
+            .iter()
+            .filter_map(|n| {
+                Some((
+                    format!("wallet of node '{}'", n.name),
+                    n.wallet_address.as_ref()?,
+                ))
+            })
+            .chain(
+                config
+                    .wallets
+                    .iter()
+                    .map(|w| (format!("wallet '{}'", w.name), &w.address)),
+            );
+        let mut warnings: Vec<String> = addresses
+            .filter(|(_, a)| !looks_like_ergo_address(a))
+            .map(|(who, a)| format!("{who}: '{a}' doesn't look like an Ergo address; it won't be found on the explorer"))
+            .collect();
+        if let Some(url) = &config.discord_webhook_url {
+            let is_webhook = url.starts_with("https://discord.com/api/webhooks/")
+                || url.starts_with("https://discordapp.com/api/webhooks/");
+            if !is_webhook {
+                warnings.push("DISCORD_WEBHOOK_URL doesn't look like a Discord webhook URL (https://discord.com/api/webhooks/...)".into());
+            } else if url.contains("/000000000000000000/") {
+                warnings.push("DISCORD_WEBHOOK_URL is still the example value from .env.example; alerts won't arrive".into());
+            }
+        }
+        config.warnings.append(&mut warnings);
         Ok(config)
     }
 }
@@ -160,6 +201,111 @@ fn nodes(vars: &BTreeMap<String, String>) -> Result<Vec<NodeConfig>> {
             })
         })
         .collect()
+}
+
+fn flag(vars: &BTreeMap<String, String>, key: &str) -> Result<bool> {
+    match vars.get(key).map(|v| v.to_lowercase()) {
+        None => Ok(false),
+        Some(v) if ["1", "true", "yes", "on"].contains(&v.as_str()) => Ok(true),
+        Some(v) if ["0", "false", "no", "off"].contains(&v.as_str()) => Ok(false),
+        Some(v) => bail!("{key}='{v}' should be true or false"),
+    }
+}
+
+/// Settings this program reads, apart from the numbered node/wallet keys.
+const KNOWN_KEYS: &[&str] = &[
+    "DISCORD_WEBHOOK_URL",
+    "DISCORD_USER",
+    "DISCORD_ICON_BASE_URL",
+    "EXPLORER_MAINNET_API",
+    "EXPLORER_P2P_API",
+    "LAG_THRESHOLD_BLOCKS",
+    "NODE_POLL_SECONDS",
+    "WALLET_POLL_SECONDS",
+    "WALLET_MIN_ALERT_ERG",
+    "WALLET_MENTION",
+    "ALERT_COOLDOWN_MINUTES",
+    "HTTP_PORT",
+    "DASHBOARD_URL",
+];
+
+/// Warnings for settings with our prefixes that nothing reads, e.g.
+/// `NODE_1_WALLET` instead of `NODE_1_WALLET_ADDRESS`, which would otherwise
+/// be silently ignored.
+fn unknown_keys(vars: &BTreeMap<String, String>) -> Vec<String> {
+    let mut out = Vec::new();
+    for key in vars.keys() {
+        if KNOWN_KEYS.contains(&key.as_str()) {
+            continue;
+        }
+        let expected: Vec<String> = match numbered(key) {
+            Some(("NODE", n, field)) => {
+                if ["NAME", "URL", "WALLET_ADDRESS"].contains(&field) {
+                    continue;
+                }
+                ["NAME", "URL", "WALLET_ADDRESS"]
+                    .iter()
+                    .map(|f| format!("NODE_{n}_{f}"))
+                    .collect()
+            }
+            Some(("WALLET", n, field)) => {
+                if ["NAME", "ADDRESS"].contains(&field) {
+                    continue;
+                }
+                ["NAME", "ADDRESS"]
+                    .iter()
+                    .map(|f| format!("WALLET_{n}_{f}"))
+                    .collect()
+            }
+            _ if ["NODE_", "WALLET_", "DISCORD_", "EXPLORER_"]
+                .iter()
+                .any(|p| key.starts_with(p)) =>
+            {
+                KNOWN_KEYS.iter().map(|k| k.to_string()).collect()
+            }
+            _ => continue,
+        };
+        let best = expected
+            .iter()
+            // A truncated name (NODE_1_WALLET) beats a merely similar one (NODE_1_NAME).
+            .min_by_key(|k| (!k.starts_with(key.as_str()), edit_distance(key, k)))
+            .map(|k| format!("; did you mean {k}?"))
+            .unwrap_or_default();
+        out.push(format!(
+            "{key} is not a setting this monitor reads, so it is ignored{best}"
+        ));
+    }
+    out
+}
+
+/// `NODE_3_URL` -> ("NODE", 3, "URL").
+fn numbered(key: &str) -> Option<(&str, u32, &str)> {
+    let (prefix, rest) = key.split_once('_')?;
+    let (n, field) = rest.split_once('_')?;
+    Some((prefix, n.parse().ok()?, field))
+}
+
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut cur = vec![i + 1];
+        for (j, cb) in b.iter().enumerate() {
+            cur.push(
+                (prev[j] + usize::from(ca != *cb))
+                    .min(prev[j + 1] + 1)
+                    .min(cur[j] + 1),
+            );
+        }
+        prev = cur;
+    }
+    prev[b.len()]
+}
+
+/// Ergo addresses are base58 (no 0, O, I or l) and at least ~50 characters.
+fn looks_like_ergo_address(a: &str) -> bool {
+    const BASE58: &str = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+    a.len() >= 40 && a.chars().all(|c| BASE58.contains(c))
 }
 
 fn wallets(vars: &BTreeMap<String, String>) -> Result<Vec<WalletConfig>> {
@@ -231,6 +377,52 @@ mod tests {
         assert_eq!(c.nodes[1].url, "http://10.0.0.2:9053");
         assert_eq!(c.nodes[1].wallet_address.as_deref(), Some("9fGrid"));
         assert_eq!(c.wallets[0].id, "mining");
+    }
+
+    #[test]
+    fn warns_about_likely_mistakes() {
+        let c = cfg(&[
+            ("NODE_1_NAME", "Grid Bot"),
+            ("NODE_1_URL", "http://a"),
+            ("NODE_1_WALLET", "9f..."),
+            ("WALLET_1_NAME", "Mining"),
+            (
+                "WALLET_1_ADDRESS",
+                "9fExampleMiningAddressxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            ),
+            ("DISCORD_WEBHOK_URL", "https://x"),
+            (
+                "DISCORD_WEBHOOK_URL",
+                "https://discord.com/api/webhooks/000000000000000000/xxxxxxxx",
+            ),
+            ("PATH", "/usr/bin"),
+        ])
+        .unwrap();
+        let w = c.warnings.join("\n");
+        assert!(
+            w.contains("NODE_1_WALLET is not a setting")
+                && w.contains("did you mean NODE_1_WALLET_ADDRESS?"),
+            "{w}"
+        );
+        assert!(w.contains("did you mean DISCORD_WEBHOOK_URL?"), "{w}");
+        assert!(w.contains("wallet 'Mining'"), "{w}");
+        assert!(w.contains("example value"), "{w}");
+        assert!(!w.contains("PATH"), "{w}");
+        assert_eq!(c.warnings.len(), 4, "{w}");
+
+        let ok = cfg(&[
+            ("WALLET_1_NAME", "Grid"),
+            (
+                "WALLET_1_ADDRESS",
+                "9eoM6oqHBziMxQPUPvhoHuLBRZpdnRMnqedcuFmj6UrQFXmYeHX",
+            ),
+            ("WALLET_POLL_SECONDS", "60"),
+            ("WALLET_MENTION", "yes"),
+        ])
+        .unwrap();
+        assert!(ok.warnings.is_empty(), "{:?}", ok.warnings);
+        assert!(ok.wallet_mention);
+        assert!(cfg(&[("WALLET_MENTION", "maybe")]).is_err());
     }
 
     #[test]

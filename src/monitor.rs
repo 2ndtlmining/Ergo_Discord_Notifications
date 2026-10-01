@@ -10,7 +10,7 @@ use tokio::sync::RwLock;
 
 use crate::alerts::{human_duration, Event, Tracker};
 use crate::config::Config;
-use crate::discord::{Discord, Embed};
+use crate::discord::{thousands, Discord, DiscordStatus, Embed};
 use crate::explorer::{self, ExplorerState};
 use crate::node::{self, Health};
 use crate::release::{self, LatestRelease};
@@ -19,6 +19,12 @@ use crate::wallet::WalletState;
 /// Consecutive polls a new condition must be seen before alerting.
 const CONFIRM_AFTER: u32 = 2;
 const EXPLORERS_KEY: &str = "__explorers";
+/// Runbook paths in alerts link here, so they open from a phone (#34).
+const REPO_BLOB_URL: &str = "https://github.com/2ndtlmining/Ergo_Discord_Notifications/blob/main";
+
+fn runbook_link(path: &str) -> String {
+    format!("[{path}]({REPO_BLOB_URL}/{path})")
+}
 
 pub type Shared = Arc<RwLock<AppState>>;
 
@@ -35,6 +41,7 @@ pub struct AppState {
     pub wallets: Vec<WalletState>,
     /// Newest Ergo node release on GitHub; null until the first check succeeds.
     pub latest_release: Option<LatestRelease>,
+    pub discord: DiscordStatus,
     /// Served separately at /api/alerts.
     #[serde(skip)]
     pub alerts: VecDeque<AlertRecord>,
@@ -211,6 +218,7 @@ impl AppState {
             nodes: Vec::new(),
             wallets: Vec::new(),
             latest_release: None,
+            discord: DiscordStatus::default(),
             alerts: VecDeque::new(),
             next_alert_id: 0,
             live: true,
@@ -264,6 +272,10 @@ pub async fn run(
         // Queued, not awaited: a slow or rate-limited Discord never delays polling (#24).
         if first {
             first = false;
+            // The first check doubles as a startup reachability report in the logs (#30).
+            for n in &state.nodes {
+                tracing::info!("first check: node [{}] {}: {}", n.id, n.condition, n.detail);
+            }
             discord.send(vec![startup_summary(&state)], vec![], false);
         }
         discord.send_alerts(queued);
@@ -446,7 +458,7 @@ fn evaluate(
                 )
                 .field(
                     "Runbook",
-                    "`docs/runbooks/explorers-unreachable.md`",
+                    &runbook_link("docs/runbooks/explorers-unreachable.md"),
                     false,
                 ),
                 true,
@@ -469,7 +481,7 @@ fn evaluate(
                     Embed::new("ok", "Recovered", &n.name).description(&format!(
                         "Back in sync{} after being {} for {}.",
                         n.full_height
-                            .map(|h| format!(" at height **{h}**"))
+                            .map(|h| format!(" at height **{}**", thousands(h)))
                             .unwrap_or_default(),
                         label(&from).to_lowercase(),
                         human_duration(lasted)
@@ -500,7 +512,7 @@ fn evaluate(
 }
 
 fn problem_embed(n: &NodeState, author: &str, tip: Option<u64>) -> Embed {
-    let h = |v: Option<u64>| v.map(|x| x.to_string()).unwrap_or("n/a".into());
+    let h = |v: Option<u64>| v.map(thousands).unwrap_or("n/a".into());
     let mut e = Embed::new(n.condition, author, &n.name).description(&format!("**{}**", n.detail));
     if n.condition != "down" {
         e = e
@@ -510,14 +522,18 @@ fn problem_embed(n: &NodeState, author: &str, tip: Option<u64>) -> Embed {
     }
     e = e.field("Endpoint", &format!("`{}`", n.url), false);
     if let Some(rb) = n.runbook {
-        e = e.field("Runbook", &format!("`{rb}`"), false);
+        e = e.field("Runbook", &runbook_link(rb), false);
     }
     e
 }
 
 fn startup_summary(state: &AppState) -> Embed {
     let s = &state.summary;
-    let icon = if s.ok == s.total { "ok" } else { "behind" };
+    // The worst condition sets the icon, so a down node shows red, not yellow.
+    let icon = ["down", "behind", "indexer-behind", "syncing", "unknown"]
+        .into_iter()
+        .find(|c| state.nodes.iter().any(|n| n.condition == *c))
+        .unwrap_or("ok");
     let mut e = Embed::new(
         icon,
         "Ergo Monitor started",
@@ -528,7 +544,7 @@ fn startup_summary(state: &AppState) -> Embed {
         state
             .reference
             .height
-            .map(|h| h.to_string())
+            .map(thousands)
             .unwrap_or("unknown (explorers unreachable)".into())
     ));
     for n in &state.nodes {

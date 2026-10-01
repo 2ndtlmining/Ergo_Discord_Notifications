@@ -60,7 +60,8 @@ async fn main() -> Result<()> {
             std::process::exit(2);
         }
     };
-    let preview = std::env::args().nth(1).as_deref() == Some("preview");
+    let command = std::env::args().nth(1);
+    let preview = command.as_deref() == Some("preview");
     if !preview {
         log_config(&config);
     }
@@ -70,6 +71,20 @@ async fn main() -> Result<()> {
         .connect_timeout(Duration::from_secs(5))
         .user_agent(concat!("ergo-monitor/", env!("CARGO_PKG_VERSION")))
         .build()?;
+
+    if command.as_deref() == Some("test-alert") {
+        // docker compose exec ergo-monitor ergo-monitor test-alert
+        match discord::test_alert(client, &config, COMMIT).await {
+            Ok(()) => {
+                println!("Test alert sent. Check your Discord channel.");
+                std::process::exit(0);
+            }
+            Err(e) => {
+                eprintln!("Test alert failed: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
     // Background loops run forever; if one stops or panics the process exits
     // so Docker restarts it, instead of serving frozen data (#23).
     let mut tasks: JoinSet<&'static str> = JoinSet::new();
@@ -77,14 +92,11 @@ async fn main() -> Result<()> {
         tracing::info!("preview mode: fake data, no polling, no Discord");
         Arc::new(RwLock::new(preview::state(COMMIT)))
     } else {
-        let shared: Shared = Arc::new(RwLock::new(AppState::new(COMMIT, Settings::from(&config))));
-        let (discord, worker) = discord::Discord::new(
-            client.clone(),
-            config.discord_webhook_url.clone(),
-            config.discord_user.clone(),
-            config.discord_icon_base_url.clone(),
-            shared.clone(),
-        );
+        let mut state = AppState::new(COMMIT, Settings::from(&config));
+        state.discord.enabled = config.discord_webhook_url.is_some();
+        let shared: Shared = Arc::new(RwLock::new(state));
+        let (discord, worker) =
+            discord::Discord::new(client.clone(), &config, COMMIT, shared.clone());
         tasks.spawn(async move {
             worker.run().await;
             "discord delivery"
@@ -213,6 +225,9 @@ async fn healthcheck() -> i32 {
 }
 
 fn log_config(config: &Config) {
+    for w in &config.warnings {
+        tracing::warn!("config: {w}");
+    }
     if config.discord_webhook_url.is_none() {
         tracing::warn!("DISCORD_WEBHOOK_URL not set: Discord alerts are disabled");
     } else if config.discord_user.is_some() {

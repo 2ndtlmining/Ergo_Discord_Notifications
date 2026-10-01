@@ -9,9 +9,11 @@ use std::collections::VecDeque;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use serde::Serialize;
 use serde_json::json;
 use tokio::sync::mpsc;
 
+use crate::config::Config;
 use crate::monitor::Shared;
 
 /// Messages kept while Discord is unreachable; the oldest are dropped first.
@@ -19,6 +21,31 @@ const MAX_QUEUED: usize = 50;
 /// A message still undelivered after this long is dropped as no longer useful.
 const GIVE_UP_AFTER_MINUTES: i64 = 60;
 const RETRY_QUEUE_EVERY: Duration = Duration::from_secs(30);
+
+/// `1882085` -> `1,882,085`.
+pub fn thousands(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Whether Discord delivery is working, for `/api/status` and the dashboard (#29).
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct DiscordStatus {
+    pub enabled: bool,
+    pub last_sent: Option<DateTime<Utc>>,
+    /// Set while delivery is failing; cleared by the next successful send.
+    pub last_error: Option<String>,
+    pub last_error_at: Option<DateTime<Utc>>,
+    /// Messages waiting to be delivered.
+    pub queued: usize,
+}
 
 /// Embed side-bar colours, keyed by the same condition names as the icons
 /// in `assets/discord/` (see scripts/gen_icons.py).
@@ -107,6 +134,48 @@ struct Webhook {
     url: String,
     mention: Option<String>,
     icon_base_url: String,
+    /// Embed titles link here when set (`DASHBOARD_URL`).
+    dashboard_url: Option<String>,
+    footer: String,
+}
+
+impl Webhook {
+    fn from_config(client: reqwest::Client, config: &Config, commit: &str) -> Option<Self> {
+        Some(Self {
+            client,
+            url: config.discord_webhook_url.clone()?,
+            mention: config.discord_user.clone(),
+            icon_base_url: config.discord_icon_base_url.clone(),
+            dashboard_url: config.dashboard_url.clone(),
+            footer: format!("Ergo Monitor · {commit}"),
+        })
+    }
+}
+
+/// `ergo-monitor test-alert`: posts one sample alert right away and reports
+/// the result, to check the webhook without waiting for a real problem (#29).
+pub async fn test_alert(
+    client: reqwest::Client,
+    config: &Config,
+    commit: &str,
+) -> Result<(), String> {
+    let hook = Webhook::from_config(client, config, commit)
+        .ok_or("DISCORD_WEBHOOK_URL is not set in .env")?;
+    let embed = Embed::new("ok", "Test alert", "Discord alerts are working").description(
+        "Sent by `ergo-monitor test-alert`. Real alerts look like this, with an @mention for problems.",
+    );
+    let msg = Outgoing {
+        embeds: vec![embed],
+        ping: true,
+        alert_ids: vec![],
+        at: Utc::now(),
+    };
+    hook.post(&msg).await.map_err(|f| match f {
+        Failure::Permanent(e) => {
+            format!("{e}: Discord rejected the webhook; check DISCORD_WEBHOOK_URL")
+        }
+        Failure::Transient(e) => format!("{e}: couldn't reach Discord"),
+    })
 }
 
 enum Failure {
@@ -119,17 +188,11 @@ enum Failure {
 impl Discord {
     pub fn new(
         client: reqwest::Client,
-        webhook_url: Option<String>,
-        mention: Option<String>,
-        icon_base_url: String,
+        config: &Config,
+        commit: &str,
         shared: Shared,
     ) -> (Self, Worker) {
-        let hook = webhook_url.map(|url| Webhook {
-            client,
-            url,
-            mention,
-            icon_base_url,
-        });
+        let hook = Webhook::from_config(client, config, commit);
         let (tx, rx) = if hook.is_some() {
             let (tx, rx) = mpsc::unbounded_channel();
             (Some(tx), Some(rx))
@@ -211,19 +274,42 @@ impl Worker {
             while queue.len() > MAX_QUEUED {
                 if let Some(dropped) = queue.pop_front() {
                     tracing::error!("discord queue full; dropped an alert from {}", dropped.at);
-                    mark(&self.shared, &dropped.alert_ids, delivery::FAILED).await;
+                    let err = Some("queue full".to_string());
+                    report(
+                        &self.shared,
+                        &dropped.alert_ids,
+                        delivery::FAILED,
+                        err,
+                        queue.len(),
+                    )
+                    .await;
                 }
             }
 
             let Some(msg) = queue.front() else { continue };
             match hook.post(msg).await {
                 Ok(()) => {
-                    mark(&self.shared, &msg.alert_ids, delivery::SENT).await;
+                    report(
+                        &self.shared,
+                        &msg.alert_ids,
+                        delivery::SENT,
+                        None,
+                        queue.len() - 1,
+                    )
+                    .await;
                     queue.pop_front();
                 }
                 Err(Failure::Permanent(e)) => {
                     tracing::error!("discord webhook rejected the message, not retrying: {e}");
-                    mark(&self.shared, &msg.alert_ids, delivery::FAILED).await;
+                    let err = Some(format!("Discord rejected the webhook ({e})"));
+                    report(
+                        &self.shared,
+                        &msg.alert_ids,
+                        delivery::FAILED,
+                        err,
+                        queue.len() - 1,
+                    )
+                    .await;
                     queue.pop_front();
                 }
                 Err(Failure::Transient(e)) => {
@@ -231,9 +317,19 @@ impl Worker {
                         tracing::error!(
                             "discord unreachable for over {GIVE_UP_AFTER_MINUTES} minutes, gave up on an alert: {e}"
                         );
-                        mark(&self.shared, &msg.alert_ids, delivery::FAILED).await;
+                        let err = Some(format!("Discord unreachable ({e})"));
+                        report(
+                            &self.shared,
+                            &msg.alert_ids,
+                            delivery::FAILED,
+                            err,
+                            queue.len() - 1,
+                        )
+                        .await;
                         queue.pop_front();
                     } else {
+                        let err = Some(format!("Discord unreachable ({e}); retrying"));
+                        report(&self.shared, &[], delivery::PENDING, err, queue.len()).await;
                         tracing::warn!(
                             "discord unreachable ({e}); {} message(s) queued, retrying in {}s",
                             queue.len(),
@@ -247,13 +343,31 @@ impl Worker {
     }
 }
 
-async fn mark(shared: &Shared, ids: &[u64], state: &'static str) {
-    if ids.is_empty() {
-        return;
-    }
+/// Records a delivery outcome on the alerts and in the Discord status.
+async fn report(
+    shared: &Shared,
+    ids: &[u64],
+    state: &'static str,
+    error: Option<String>,
+    queued: usize,
+) {
+    let now = Utc::now();
     let mut s = shared.write().await;
     for a in s.alerts.iter_mut().filter(|a| ids.contains(&a.id)) {
         a.delivery = state;
+    }
+    let d = &mut s.discord;
+    d.queued = queued;
+    match error {
+        None => {
+            d.last_sent = Some(now);
+            d.last_error = None;
+            d.last_error_at = None;
+        }
+        Some(e) => {
+            d.last_error = Some(e);
+            d.last_error_at = Some(now);
+        }
     }
 }
 
@@ -271,12 +385,13 @@ impl Webhook {
                     "icon_url": format!("{}/{}.png", self.icon_base_url, e.icon),
                 },
                 "title": e.title,
+                "url": self.dashboard_url,
                 "description": e.description,
                 "color": color(&e.icon),
                 "fields": e.fields.iter().map(|(name, value, inline)| json!({
                     "name": name, "value": value, "inline": inline,
                 })).collect::<Vec<_>>(),
-                "footer": { "text": "Ergo Monitor" },
+                "footer": { "text": self.footer },
                 // When the alert happened, not when a retry finally got through.
                 "timestamp": msg.at.to_rfc3339(),
             })).collect::<Vec<_>>(),
@@ -357,13 +472,14 @@ mod tests {
             wallet_poll_seconds: 300,
         };
         let shared: Shared = Arc::new(RwLock::new(AppState::new("test", settings)));
-        let (discord, worker) = Discord::new(
-            reqwest::Client::new(),
-            Some(url),
-            Some("123".into()),
-            "https://icons".into(),
-            shared.clone(),
-        );
+        let mut config = Config::from_vars([
+            ("DISCORD_WEBHOOK_URL".to_string(), url),
+            ("DISCORD_USER".to_string(), "123".to_string()),
+        ])
+        .unwrap();
+        config.discord_icon_base_url = "https://icons".into();
+        let (discord, worker) =
+            Discord::new(reqwest::Client::new(), &config, "test", shared.clone());
         tokio::spawn(worker.run());
         let queued = {
             let mut s = shared.write().await;
@@ -404,6 +520,14 @@ mod tests {
         assert_eq!(bodies[1]["embeds"].as_array().unwrap().len(), 2);
         assert_eq!(bodies[1]["content"], "<@123>");
         assert_eq!(bodies[2]["content"], "");
+    }
+
+    #[test]
+    fn formats_thousands() {
+        assert_eq!(thousands(0), "0");
+        assert_eq!(thousands(999), "999");
+        assert_eq!(thousands(1_000), "1,000");
+        assert_eq!(thousands(1_882_085), "1,882,085");
     }
 
     #[tokio::test]
