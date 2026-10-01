@@ -7,7 +7,7 @@ use chrono::{Duration, Utc};
 use crate::discord::Embed;
 use crate::explorer::ExplorerState;
 use crate::monitor::{record_alert, AppState, NodeState, Reference, Summary};
-use crate::release::LatestRelease;
+use crate::release::{LatestRelease, Release};
 use crate::wallet::{TxSummary, WalletState};
 
 const TIP: u64 = 1_882_085;
@@ -34,6 +34,14 @@ pub fn state(commit: &'static str) -> AppState {
     s.latest_release = Some(LatestRelease {
         version: "6.0.7".into(),
         url: "https://github.com/ergoplatform/ergo/releases/tag/v6.0.7".into(),
+        lines: ["6.1.7", "6.0.7"]
+            .into_iter()
+            .map(|v| Release {
+                version: v.into(),
+                url: format!("https://github.com/ergoplatform/ergo/releases/tag/v{v}"),
+                prerelease: v.starts_with("6.1"),
+            })
+            .collect(),
         checked_at: now,
     });
 
@@ -57,7 +65,11 @@ pub fn state(commit: &'static str) -> AppState {
             indexed_lag: Some(0),
             sync_progress: None,
             peers: Some(30),
-            version: Some("6.0.7".into()),
+            version: Some("6.1.7".into()),
+            latest_version: Some("6.1.7".into()),
+            latest_version_url: Some(
+                "https://github.com/ergoplatform/ergo/releases/tag/v6.1.7".into(),
+            ),
             version_outdated: Some(false),
             is_mining: false,
             is_explorer: true,
@@ -117,6 +129,9 @@ pub fn state(commit: &'static str) -> AppState {
     stuck.is_explorer = false;
     stuck.peers = Some(3);
     stuck.version = Some("6.0.3".into());
+    stuck.latest_version = Some("6.0.7".into());
+    stuck.latest_version_url =
+        Some("https://github.com/ergoplatform/ergo/releases/tag/v6.0.7".into());
     stuck.version_outdated = Some(true);
     stuck.runbook = Some("docs/runbooks/node-behind.md");
     stuck.status_since = Some(now - Duration::minutes(12));
@@ -134,7 +149,8 @@ pub fn state(commit: &'static str) -> AppState {
     duck.full_lag = None;
     duck.indexed_lag = None;
     duck.peers = None;
-    duck.version = Some("6.0.7".into());
+    duck.version = Some("6.1.6".into());
+    duck.version_outdated = Some(true);
     duck.latency_ms = None;
     duck.last_ok = Some(now - Duration::minutes(9));
     duck.last_error = duck.detail.clone().into();

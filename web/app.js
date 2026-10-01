@@ -222,11 +222,11 @@ function heightCell(value, lag, cls, label, n) {
     <span class="lag ${bad ? "bad" : ""}">${lagText}</span></div>`;
 }
 
-function versionText(n, latest) {
+function versionText(n) {
   if (!n.version) return "n/a";
-  if (!latest) return esc(n.version);
+  if (!n.latest_version) return esc(n.version);
   if (n.version_outdated) {
-    return `${esc(n.version)} <a class="outdated" href="${esc(latest.url)}" target="_blank" rel="noopener">${esc(latest.version)} available</a>`;
+    return `${esc(n.version)} <a class="outdated" href="${esc(n.latest_version_url)}" target="_blank" rel="noopener">${esc(n.latest_version)} available</a>`;
   }
   return `${esc(n.version)} <span class="latest">latest</span>`;
 }
@@ -245,9 +245,8 @@ function renderNodes() {
   const wallets = new Map(status.wallets.filter((w) => w.node_id).map((w) => [w.node_id, w]));
   $("node-rows").innerHTML = rows.map((n) => {
     const open = expanded.has(n.id);
-    const latest = status.latest_release;
     const roles = [n.is_mining && '<span class="role mining">Mining</span>', n.is_explorer && '<span class="role">Indexer</span>',
-      n.version_outdated && `<span class="role update" title="Running ${esc(n.version)}, latest is ${esc(latest?.version)}">Update available</span>`]
+      n.version_outdated && `<span class="role update" title="Running ${esc(n.version)}, latest is ${esc(n.latest_version)}">Update available</span>`]
       .filter(Boolean).join("");
     const w = wallets.get(n.id);
     const syncing = n.condition === "syncing"
@@ -277,7 +276,7 @@ function renderNodes() {
           <dt>In this state</dt><dd>${since(n.status_since)}</dd>
           <dt>Last response</dt><dd>${ago(n.last_ok)}</dd>
           <dt>Headers</dt><dd>${fmt(n.headers_height)}</dd>
-          <dt>Version</dt><dd>${versionText(n, latest)}</dd>
+          <dt>Version</dt><dd>${versionText(n)}</dd>
           ${w ? `<dt>Wallet</dt><dd>${erg(w.balance_erg)} ERG · ${esc(shortAddr(w.address))}</dd>` : ""}
         </dl>
       </div>

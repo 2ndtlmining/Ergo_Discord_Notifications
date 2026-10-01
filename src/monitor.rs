@@ -129,7 +129,10 @@ pub struct NodeState {
     pub sync_progress: Option<f64>,
     pub peers: Option<u32>,
     pub version: Option<String>,
-    /// True when `version` is older than `latest_release`; null if either is unknown.
+    /// Newest release of the node's own line (e.g. 6.1.x), else the stable release.
+    pub latest_version: Option<String>,
+    pub latest_version_url: Option<String>,
+    /// True when `version` is older than `latest_version`; null if either is unknown.
     pub version_outdated: Option<bool>,
     pub is_mining: bool,
     pub is_explorer: bool,
@@ -248,10 +251,14 @@ async fn poll(config: &Config, client: &reqwest::Client, previous: &AppState) ->
         let version = info
             .and_then(|i| i.app_version.clone())
             .or(prev.and_then(|p| p.version.clone()));
-        let version_outdated = version
+        let target = version
             .as_deref()
             .zip(previous.latest_release.as_ref())
-            .and_then(|(v, latest)| release::is_outdated(v, &latest.version));
+            .map(|(v, latest)| release::target_for(v, latest));
+        let version_outdated = version
+            .as_deref()
+            .zip(target)
+            .and_then(|(v, (t, _))| release::is_outdated(v, t));
         nodes.push(NodeState {
             id: cfg.id.clone(),
             name: cfg.name.clone(),
@@ -278,6 +285,8 @@ async fn poll(config: &Config, client: &reqwest::Client, previous: &AppState) ->
             },
             peers: info.and_then(|i| i.peers_count),
             version,
+            latest_version: target.map(|(v, _)| v.to_string()),
+            latest_version_url: target.map(|(_, u)| u.to_string()),
             version_outdated,
             is_mining: info.is_some_and(|i| i.is_mining),
             is_explorer: info.is_some_and(|i| i.is_explorer),
