@@ -199,7 +199,9 @@ docker compose logs | grep -i "config:"
 | Received | A new incoming transaction to a watched wallet (no @mention unless `WALLET_MENTION=true`) |
 
 On startup the monitor posts one summary and records the current state
-silently, so restarts never re-announce old problems or transactions. Every
+silently, so restarts never re-announce old problems or transactions. If it
+restarts again within 10 minutes (for example in a crash loop) it skips the
+summary and logs why; a redeploy always posts one. Every
 problem alert names a runbook in [`docs/runbooks/`](docs/runbooks) with the fix.
 
 ## Development
