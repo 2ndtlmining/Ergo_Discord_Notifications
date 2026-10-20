@@ -447,7 +447,7 @@ function renderWallets() {
       <div class="who">${esc(w.name)}${w.node_id ? "<small>node wallet</small>" : ""}</div>
       <div class="bal">${erg(w.balance_erg)}<small>ERG</small></div>
       <div class="meta">${w.last_error ? `<span class="err">Balance unavailable: ${esc(w.last_error)}</span>` : last}</div>
-      <div class="meta"><a href="https://explorer.ergoplatform.com/en/addresses/${esc(w.address)}" target="_blank" rel="noopener">${esc(shortAddr(w.address))}</a> · ${fmt(w.total_txs)} txs</div>
+      <div class="meta"><a href="https://explorer.ergoplatform.com/en/addresses/${esc(w.address)}" target="_blank" rel="noopener">${esc(shortAddr(w.address))}</a> · ${fmt(w.total_txs)} txs${w.source ? ` · via ${esc(w.source)}` : ""}</div>
     </div>`;
   }).join(""));
 }

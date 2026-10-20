@@ -25,7 +25,14 @@ curl -s https://api.ergoplatform.com/api/v1/transactions/<tx-id> | jq '{inclusio
   `0.01`) in `.env` and run `scripts/deploy.ps1`.
 - **Expected a payment that never came?** Check the address on the explorer. Only
   confirmed transactions show up; the monitor checks every `WALLET_POLL_SECONDS` (5 minutes).
-- **"Balance unavailable" on the dashboard?** The public explorer API didn't respond;
-  see [explorers-unreachable.md](explorers-unreachable.md).
+- **"Balance unavailable" on the dashboard?** No source answered: both public explorers
+  failed, and no monitored node with `extraIndex` could step in. The message says why for
+  each one (`timed out after 30s`, `HTTP 429`, `Connection refused`, ...). One failed check
+  loses nothing: the next one that succeeds announces every transaction since the last
+  block seen. See [explorers-unreachable.md](explorers-unreachable.md).
+- **"via node …" under a wallet?** Both explorers failed on that check, and one of your
+  nodes answered from its own indexer instead. Any node whose indexer is within
+  `LAG_THRESHOLD_BLOCKS` of its own chain, and that is not down or syncing, is used. The log
+  says `read from node <name> (...)` with the explorer errors.
 
 Never move funds, unlock wallets, or handle keys on the back of an alert. Wallets are a human-only matter.

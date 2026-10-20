@@ -7,6 +7,9 @@
 
 Without a chain tip, the monitor can't tell whether a node is behind, so **lag
 alerts are paused**. Nodes show `unknown`, but **down alerts still work**.
+**Wallets keep working** if any monitored node runs `extraIndex` and its indexer is caught
+up: wallet balances and incoming transactions are read from that node instead, and the
+dashboard shows "via node <name>" under each wallet.
 
 ## 1. Is it them or us?
 

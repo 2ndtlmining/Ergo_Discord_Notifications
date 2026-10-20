@@ -192,6 +192,7 @@ pub fn state(commit: &'static str) -> AppState {
             }),
             last_ok: Some(now),
             last_error: None,
+            source: Some("api.ergoplatform.com".into()),
         };
     s.wallets = vec![
         wallet(
