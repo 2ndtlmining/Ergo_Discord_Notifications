@@ -12,7 +12,8 @@ sends Discord alerts when something needs attention.
 - **Versions**: each node's version, flagged when a newer Ergo node release
   is out on GitHub. Click a node's address to open its `/panel`.
 - **Wallets**: balance and incoming transactions for bot/pool wallets and any
-  other address.
+  other address. Read from the public explorers, or from one of your own nodes
+  with `extraIndex` when both explorers fail.
 - **Dashboard** at `http://<host>:7777`, plus a JSON API for scripts and AI
   agents (see [AGENTS.md](AGENTS.md)).
 - One Docker container. Everything compiles inside Docker, so you don't need

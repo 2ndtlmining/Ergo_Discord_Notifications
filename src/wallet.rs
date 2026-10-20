@@ -1,9 +1,10 @@
 //! Wallet balances and incoming-transaction alerts (#6), replacing main.py.
 //!
 //! Wallets are watched by address through the public explorer, so no node
-//! API keys are needed. On startup the newest block height per wallet is
-//! recorded silently; after that every new incoming transaction is reported,
-//! so restarts no longer re-announce old transactions.
+//! API keys are needed. When both explorers fail, a monitored node whose
+//! indexer (`extraIndex`) is caught up answers instead. On startup the newest
+//! block height per wallet is recorded silently; after that every new incoming
+//! transaction is reported, so restarts no longer re-announce old transactions.
 
 use std::collections::HashMap;
 use std::time::Duration as StdDuration;
@@ -13,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
 use crate::discord::{Discord, Embed};
-use crate::monitor::{record_alert, Shared};
+use crate::monitor::{record_alert, NodeState, Shared};
 
 const NANO: f64 = 1_000_000_000.0;
 const TX_URL: &str = "https://explorer.ergoplatform.com/en/transactions";
@@ -31,6 +32,9 @@ pub struct WalletState {
     pub last_tx: Option<TxSummary>,
     pub last_ok: Option<DateTime<Utc>>,
     pub last_error: Option<String>,
+    /// Where the last successful read came from: an explorer's host, or
+    /// `node <name>` when both explorers failed.
+    pub source: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -68,6 +72,12 @@ struct Io {
 #[serde(rename_all = "camelCase")]
 struct Balance {
     nano_ergs: u64,
+}
+
+/// A node's `/blockchain/balance`: confirmed and unconfirmed, each a `Balance`.
+#[derive(Deserialize)]
+struct NodeBalance {
+    confirmed: Option<Balance>,
 }
 
 impl Tx {
@@ -132,6 +142,7 @@ impl WalletState {
             last_tx: None,
             last_ok: None,
             last_error: None,
+            source: None,
         }
     }
 }
@@ -140,6 +151,37 @@ impl WalletState {
 /// to catch up on a busy wallet (#26).
 const PAGE: u64 = 50;
 const MAX_PAGES: u64 = 6;
+
+/// How long one wallet request may take. Longer than the client's 10 s: a
+/// mining or pool address with a long history is slow to answer, and at 10 s
+/// its checks failed now and then while every other wallet was fine.
+const WALLET_TIMEOUT: StdDuration = StdDuration::from_secs(30);
+
+/// The gap between wallets starting their check, so a restart does not ask the
+/// explorer for every wallet in the same instant.
+const STAGGER: StdDuration = StdDuration::from_millis(300);
+
+/// Why a request failed, in a few words. `reqwest`'s own message is "error
+/// sending request for url (...)" whatever happened: the cause -- a timeout,
+/// a refused connection, a DNS failure -- is in its source chain, and the log
+/// never said which.
+fn describe(e: &reqwest::Error) -> String {
+    if e.is_timeout() {
+        return format!("timed out after {}s", WALLET_TIMEOUT.as_secs());
+    }
+    if let Some(status) = e.status() {
+        return format!("HTTP {}", status.as_u16());
+    }
+    let mut cause: &dyn std::error::Error = e;
+    while let Some(next) = cause.source() {
+        cause = next;
+    }
+    if e.is_decode() {
+        format!("unexpected response: {cause}")
+    } else {
+        cause.to_string()
+    }
+}
 
 /// Balance plus every transaction newer than `seen` (newest first), paging
 /// back as needed. The bool is true when there were more new transactions
@@ -150,18 +192,25 @@ async fn fetch(
     address: &str,
     seen: Option<u64>,
 ) -> Result<(u64, TxPage, bool), String> {
-    let get = |path: String| async move {
+    let get = |what: &'static str, path: String| async move {
         client
             .get(format!("{base}/api/v1/addresses/{address}/{path}"))
+            .timeout(WALLET_TIMEOUT)
             .send()
             .await
             .and_then(|r| r.error_for_status())
-            .map_err(|e| e.to_string())
+            .map_err(|e| format!("{what}: {}", describe(&e)))
     };
-    let page_at = |offset: u64| get(format!("transactions?limit={PAGE}&offset={offset}"));
-    let (balance, first) = tokio::try_join!(get("balance/confirmed".into()), page_at(0))?;
-    let balance: Balance = balance.json().await.map_err(|e| e.to_string())?;
-    let mut page: TxPage = first.json().await.map_err(|e| e.to_string())?;
+    let page_at = |offset: u64| {
+        get(
+            "transactions",
+            format!("transactions?limit={PAGE}&offset={offset}"),
+        )
+    };
+    let (balance, first) =
+        tokio::try_join!(get("balance", "balance/confirmed".into()), page_at(0))?;
+    let balance: Balance = balance.json().await.map_err(|e| describe(&e))?;
+    let mut page: TxPage = first.json().await.map_err(|e| describe(&e))?;
 
     let mut truncated = false;
     if let Some(after) = seen {
@@ -180,7 +229,7 @@ async fn fetch(
                 .await?
                 .json()
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| describe(&e))?;
             if more.items.is_empty() {
                 break;
             }
@@ -191,18 +240,154 @@ async fn fetch(
     Ok((balance.nano_ergs, page, truncated))
 }
 
-/// The mainnet explorer first, then the P2P explorer if that fails (#26).
-async fn fetch_any(
+/// The same answer from a node's own indexer (`extraIndex`), for when both
+/// explorers are down.
+///
+/// `/blockchain/transaction/byAddress` and `/blockchain/balance` take the
+/// address as the raw request body, and their transactions have the
+/// explorer's field names, so they parse into the same `TxPage`. The API does
+/// not specify the order of those transactions, so it is detected: a page
+/// that runs oldest first means the newest are at the far end of the list.
+///
+/// One page only. This is the fallback for an outage, not the catch-up path;
+/// a check that finds more than one page of new transactions says so, as the
+/// explorer path does past `MAX_PAGES`.
+async fn fetch_from_node(
     client: &reqwest::Client,
-    bases: &[String],
+    url: &str,
     address: &str,
     seen: Option<u64>,
 ) -> Result<(u64, TxPage, bool), String> {
+    let post = |what: &'static str, path: String| async move {
+        client
+            .post(format!("{url}{path}"))
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(address.to_string())
+            .timeout(WALLET_TIMEOUT)
+            .send()
+            .await
+            .and_then(|r| r.error_for_status())
+            .map_err(|e| format!("{what}: {}", describe(&e)))
+    };
+    let page_at = |offset: u64| {
+        post(
+            "transactions",
+            format!("/blockchain/transaction/byAddress?offset={offset}&limit={PAGE}"),
+        )
+    };
+    let (balance, first) =
+        tokio::try_join!(post("balance", "/blockchain/balance".into()), page_at(0))?;
+    let balance: NodeBalance = balance.json().await.map_err(|e| describe(&e))?;
+    let nano = balance
+        .confirmed
+        .ok_or("balance: the node returned no confirmed balance")?
+        .nano_ergs;
+    let mut page: TxPage = first.json().await.map_err(|e| describe(&e))?;
+    if oldest_first(&page) && page.total > page.items.len() as u64 {
+        page = page_at(page.total.saturating_sub(PAGE))
+            .await?
+            .json()
+            .await
+            .map_err(|e| describe(&e))?;
+    }
+    page.items
+        .sort_by_key(|t| std::cmp::Reverse(t.inclusion_height));
+    let truncated = seen.is_some_and(|after| {
+        page.total > page.items.len() as u64
+            && page
+                .items
+                .last()
+                .is_some_and(|t| t.inclusion_height > after)
+    });
+    Ok((nano, page, truncated))
+}
+
+fn oldest_first(page: &TxPage) -> bool {
+    matches!(
+        (page.items.first(), page.items.last()),
+        (Some(first), Some(last)) if first.inclusion_height < last.inclusion_height
+    )
+}
+
+/// Where a wallet can be read from, in the order they are tried.
+#[derive(Debug, Clone, PartialEq)]
+enum Source {
+    Explorer(String),
+    Node { name: String, url: String },
+}
+
+impl Source {
+    fn label(&self) -> String {
+        match self {
+            Self::Explorer(base) => base
+                .trim_start_matches("https://")
+                .trim_start_matches("http://")
+                .trim_end_matches('/')
+                .to_string(),
+            Self::Node { name, .. } => format!("node {name}"),
+        }
+    }
+}
+
+/// The two explorers, then every monitored node whose indexer can answer: up,
+/// not syncing, and indexed to within `lag` blocks of its own chain. A node
+/// is judged against itself because the moment this matters is when the
+/// explorers -- the reference height -- are the thing that is down.
+fn sources(config: &Config, nodes: &[NodeState]) -> Vec<Source> {
+    let mut out = vec![Source::Explorer(config.explorer_mainnet_api.clone())];
+    if config.explorer_p2p_api != config.explorer_mainnet_api {
+        out.push(Source::Explorer(config.explorer_p2p_api.clone()));
+    }
+    out.extend(
+        nodes
+            .iter()
+            .filter(|n| n.status != "down" && n.status != "syncing")
+            .filter(|n| {
+                matches!((n.full_height, n.indexed_height),
+                    (Some(full), Some(indexed)) if full.saturating_sub(indexed) <= config.lag_threshold_blocks)
+            })
+            .map(|n| Source::Node {
+                name: n.name.clone(),
+                url: n.url.trim_end_matches('/').to_string(),
+            }),
+    );
+    out
+}
+
+struct Fetched {
+    nano: u64,
+    page: TxPage,
+    truncated: bool,
+    source: String,
+    /// The sources that failed before this one answered.
+    skipped: Vec<String>,
+}
+
+/// The first source that answers (#26): the mainnet explorer, then the P2P
+/// explorer, then the indexing nodes.
+async fn fetch_any(
+    client: &reqwest::Client,
+    sources: &[Source],
+    address: &str,
+    seen: Option<u64>,
+) -> Result<Fetched, String> {
     let mut errors = Vec::new();
-    for base in bases {
-        match fetch(client, base, address, seen).await {
-            Ok(r) => return Ok(r),
-            Err(e) => errors.push(format!("{base}: {e}")),
+    for source in sources {
+        let result = match source {
+            Source::Explorer(base) => fetch(client, base, address, seen).await,
+            Source::Node { url, .. } => fetch_from_node(client, url, address, seen).await,
+        };
+        match result {
+            Ok((nano, page, truncated)) => {
+                return Ok(Fetched {
+                    nano,
+                    page,
+                    truncated,
+                    source: source.label(),
+                    skipped: errors,
+                })
+            }
+            Err(e) => errors.push(format!("{}: {e}", source.label())),
         }
     }
     Err(errors.join("; "))
@@ -228,16 +413,17 @@ pub async fn run(
 
     loop {
         interval.tick().await;
-        let mut bases = vec![config.explorer_mainnet_api.clone()];
-        if config.explorer_p2p_api != config.explorer_mainnet_api {
-            bases.push(config.explorer_p2p_api.clone());
-        }
+        let sources = sources(&config, &shared.read().await.nodes);
         let tasks: Vec<_> = wallets
             .iter()
-            .map(|w| {
-                let (c, bases, addr) = (client.clone(), bases.clone(), w.address.clone());
+            .enumerate()
+            .map(|(i, w)| {
+                let (c, sources, addr) = (client.clone(), sources.clone(), w.address.clone());
                 let after = seen.get(&w.id).copied();
-                tokio::spawn(async move { fetch_any(&c, &bases, &addr, after).await })
+                tokio::spawn(async move {
+                    tokio::time::sleep(STAGGER * i as u32).await;
+                    fetch_any(&c, &sources, &addr, after).await
+                })
             })
             .collect();
 
@@ -249,7 +435,20 @@ pub async fn run(
                     tracing::warn!("wallet {}: {e}", w.name);
                     w.last_error = Some(e);
                 }
-                Ok((nano, page, truncated)) => {
+                Ok(Fetched {
+                    nano,
+                    page,
+                    truncated,
+                    source,
+                    skipped,
+                }) => {
+                    if !skipped.is_empty() {
+                        tracing::info!(
+                            "wallet {}: read from {source} ({})",
+                            w.name,
+                            skipped.join("; ")
+                        );
+                    }
                     if truncated {
                         tracing::warn!(
                             "wallet {}: more than {} transactions since the last check; \
@@ -279,6 +478,7 @@ pub async fn run(
                     w.last_tx = page.items.first().map(|t| t.summary(&w.address));
                     w.last_ok = Some(Utc::now());
                     w.last_error = None;
+                    w.source = Some(source);
                 }
             }
         }
@@ -455,11 +655,200 @@ mod tests {
     #[tokio::test]
     async fn falls_back_to_the_second_explorer() {
         let good = fake_explorer(10).await;
-        let bases = ["http://127.0.0.1:1".to_string(), good];
-        let (_, page, _) = fetch_any(&reqwest::Client::new(), &bases, ME, None)
+        let sources = [
+            Source::Explorer("http://127.0.0.1:1".to_string()),
+            Source::Explorer(good),
+        ];
+        let got = fetch_any(&reqwest::Client::new(), &sources, ME, None)
             .await
             .unwrap();
-        assert_eq!(page.items.len(), 10);
+        assert_eq!(got.page.items.len(), 10);
+        assert_eq!(got.skipped.len(), 1);
+    }
+
+    /// A fake node indexer holding `total` transactions at heights total..1,
+    /// served newest first or (`oldest_first`) the other way round. It
+    /// insists on the address as the raw POST body, as the node does.
+    async fn fake_node(total: u64, oldest_first: bool) -> String {
+        use axum::{extract::Query, routing::post, Json, Router};
+        use std::collections::HashMap;
+        let app = Router::new()
+            .route(
+                "/blockchain/balance",
+                post(|body: String| async move {
+                    assert_eq!(body, ME);
+                    Json(serde_json::json!({
+                        "confirmed": { "nanoErgs": 7_000_000_000u64, "tokens": [] },
+                        "unconfirmed": { "nanoErgs": 0, "tokens": [] }
+                    }))
+                }),
+            )
+            .route(
+                "/blockchain/transaction/byAddress",
+                post(
+                    move |Query(q): Query<HashMap<String, u64>>, body: String| async move {
+                        assert_eq!(body, ME);
+                        let (limit, offset) = (q["limit"], q["offset"]);
+                        let heights: Vec<u64> = if oldest_first {
+                            (1..=total).collect()
+                        } else {
+                            (1..=total).rev().collect()
+                        };
+                        let items: Vec<_> = heights
+                            .into_iter()
+                            .skip(offset as usize)
+                            .take(limit as usize)
+                            .map(|h| {
+                                serde_json::json!({
+                                    "id": format!("tx{h}"), "timestamp": 1_790_416_460_444u64,
+                                    "inclusionHeight": h, "numConfirmations": 1, "index": 0,
+                                    "inputs": [], "dataInputs": [],
+                                    "outputs": [{ "address": ME, "value": 1, "ergoTree": "00" }],
+                                })
+                            })
+                            .collect();
+                        Json(serde_json::json!({ "items": items, "total": total }))
+                    },
+                ),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        base
+    }
+
+    #[tokio::test]
+    async fn falls_back_to_an_indexing_node_when_both_explorers_fail() {
+        let node = fake_node(10, false).await;
+        let sources = [
+            Source::Explorer("http://127.0.0.1:1".to_string()),
+            Source::Explorer("http://127.0.0.1:2".to_string()),
+            Source::Node {
+                name: "Hosted Explorer".into(),
+                url: node,
+            },
+        ];
+        let got = fetch_any(&reqwest::Client::new(), &sources, ME, Some(7))
+            .await
+            .unwrap();
+        assert_eq!(got.source, "node Hosted Explorer");
+        assert_eq!(got.skipped.len(), 2);
+        assert_eq!(got.nano, 7_000_000_000);
+        assert_eq!(got.page.total, 10);
+        assert_eq!(incoming_since(&got.page, ME, 7).len(), 3);
+    }
+
+    /// The node's API does not say which way its pages run. Either way the
+    /// newest transactions come back, newest first.
+    #[tokio::test]
+    async fn reads_the_newest_page_whichever_way_the_node_orders_it() {
+        for oldest_first in [false, true] {
+            let node = fake_node(120, oldest_first).await;
+            let (_, page, truncated) =
+                fetch_from_node(&reqwest::Client::new(), &node, ME, Some(100))
+                    .await
+                    .unwrap();
+            assert_eq!(page.items.len() as u64, PAGE, "oldest_first={oldest_first}");
+            assert_eq!(
+                page.items[0].inclusion_height, 120,
+                "oldest_first={oldest_first}"
+            );
+            assert!(page
+                .items
+                .windows(2)
+                .all(|w| w[0].inclusion_height > w[1].inclusion_height));
+            assert_eq!(incoming_since(&page, ME, 100).len(), 20);
+            assert!(!truncated, "twenty new ones fit in the one page");
+
+            // Further behind than one page: says so rather than paging.
+            let (_, _, truncated) = fetch_from_node(&reqwest::Client::new(), &node, ME, Some(10))
+                .await
+                .unwrap();
+            assert!(truncated, "oldest_first={oldest_first}");
+        }
+    }
+
+    fn a_node(
+        name: &str,
+        status: &'static str,
+        full: Option<u64>,
+        indexed: Option<u64>,
+    ) -> NodeState {
+        NodeState {
+            id: name.to_lowercase(),
+            name: name.into(),
+            url: format!("http://{name}:9053/"),
+            wallet_address: None,
+            status,
+            condition: status,
+            detail: String::new(),
+            status_since: None,
+            full_height: full,
+            headers_height: full,
+            indexed_height: indexed,
+            full_lag: None,
+            indexed_lag: None,
+            sync_progress: None,
+            peers: None,
+            version: None,
+            latest_version: None,
+            latest_version_url: None,
+            version_outdated: None,
+            is_mining: false,
+            is_explorer: indexed.is_some(),
+            latency_ms: None,
+            last_ok: None,
+            last_error: None,
+            runbook: None,
+        }
+    }
+
+    #[test]
+    fn only_nodes_whose_indexer_can_answer_are_fallbacks() {
+        let config = Config::from_vars(std::iter::empty()).unwrap();
+        let nodes = [
+            a_node("Indexed", "ok", Some(1_000), Some(998)),
+            // Explorers down: the node's status is unknown, and it still counts.
+            a_node("Unknown", "unknown", Some(1_000), Some(1_000)),
+            a_node("NoIndex", "ok", Some(1_000), None),
+            a_node("IndexBehind", "ok", Some(1_000), Some(900)),
+            a_node("Down", "down", Some(1_000), Some(1_000)),
+            a_node("Syncing", "syncing", Some(1_000), Some(1_000)),
+        ];
+        let labels: Vec<String> = sources(&config, &nodes).iter().map(Source::label).collect();
+        assert_eq!(
+            labels,
+            [
+                "api.ergoplatform.com",
+                "api-102.ergoplatform.com",
+                "node Indexed",
+                "node Unknown"
+            ]
+        );
+        // The trailing slash is dropped, so paths join cleanly.
+        assert!(sources(&config, &nodes).contains(&Source::Node {
+            name: "Indexed".into(),
+            url: "http://Indexed:9053".into()
+        }));
+    }
+
+    /// The log said "error sending request for url (...)" whatever happened.
+    #[tokio::test]
+    async fn failures_say_what_went_wrong() {
+        let client = reqwest::Client::new();
+        let refused = fetch(&client, "http://127.0.0.1:1", ME, None)
+            .await
+            .unwrap_err();
+        assert!(refused.to_lowercase().contains("refused"), "{refused}");
+        assert!(!refused.contains("error sending request"), "{refused}");
+
+        use axum::{http::StatusCode, routing::get, Router};
+        let app = Router::new().fallback(get(|| async { StatusCode::TOO_MANY_REQUESTS }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let limited = fetch(&client, &base, ME, None).await.unwrap_err();
+        assert!(limited.ends_with("HTTP 429"), "{limited}");
     }
 
     #[test]
